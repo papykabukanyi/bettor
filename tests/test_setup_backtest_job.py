@@ -150,5 +150,38 @@ def test_a_study_starts_only_on_a_complete_archive_and_one_at_a_time(monkeypatch
     monkeypatch.setattr(job, "_running", lambda name: name == "stocks_multiyear")
     assert job.maybe_start_multiyear("options")["action"] == "a_study_is_running"
     monkeypatch.setattr(job, "_running", lambda name: False)
-    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False})
+    grid = [f"{a}:{b}" for a, b in job.PARAM_GRID]
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False, "grid": grid})
     assert job.maybe_start_multiyear("stocks")["action"] == "already_published"
+    # A study run without the current training grid is re-run with it.
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False})
+    launched.clear()
+    job.maybe_start_multiyear("stocks")
+    assert launched == ["stocks_multiyear"]
+
+
+
+def test_training_picks_the_setting_and_symbols_from_prior_years_only():
+    rows = []
+    for year in range(2016, 2026):
+        ts = int(pd.Timestamp(f"{year}-06-01", tz="UTC").timestamp())
+        for i in range(10):
+            # setting "1.5:3.0" makes money on A every year; "0.5:2.0" loses on everything
+            rows.append({"symbol": "A", "param": "1.5:3.0", "entry_ts": ts + i, "net_return": 0.005 if i % 3 else -0.003})
+            rows.append({"symbol": "A", "param": "0.5:2.0", "entry_ts": ts + i, "net_return": -0.002})
+            rows.append({"symbol": "B", "param": "1.5:3.0", "entry_ts": ts + i, "net_return": -0.004})
+            rows.append({"symbol": "B", "param": "0.5:2.0", "entry_ts": ts + i, "net_return": -0.004})
+    tr = job.walk_forward_trained(pd.DataFrame(rows), default_param="0.5:2.0", min_trades=6, min_train_trades=10)
+    assert all(y["param"] == "1.5:3.0" for y in tr["years"])
+    assert tr["eligible_now"] == ["A"] and tr["param_now"] == {"STOP_BUFFER_ATR15": 1.5, "MIN_RR": 3.0}
+    assert tr["out_of_sample"]["avg"] > 0 > tr["default_every_symbol"]["avg"] and tr["enforce"] is True
+
+
+def test_an_enforced_trained_result_sets_the_bots_plan_settings(monkeypatch):
+    from data import alpaca_setup, alpaca_strategy
+    monkeypatch.setattr(alpaca_setup, "STOP_BUFFER_ATR15", alpaca_setup.STOP_BUFFER_ATR15)
+    monkeypatch.setattr(alpaca_setup, "MIN_RR", alpaca_setup.MIN_RR)
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": True, "symbols": ["NVDA"], "rule": "r",
+                                                          "params": {"STOP_BUFFER_ATR15": 1.5, "MIN_RR": 3.0}})
+    alpaca_strategy.evaluate_setup_candidate("COST")
+    assert alpaca_setup.STOP_BUFFER_ATR15 == 1.5 and alpaca_setup.MIN_RR == 3.0

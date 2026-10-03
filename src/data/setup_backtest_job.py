@@ -229,15 +229,21 @@ def run_crypto(days: int) -> dict[str, Any]:
 MULTIYEAR_WORKERS = int(os.getenv("SETUP_MULTIYEAR_WORKERS", "5") or "5")
 ELIGIBILITY_MIN_TRADES = int(os.getenv("SETUP_ELIGIBILITY_MIN_TRADES", "6") or "6")
 ELIGIBILITY_LOOKBACK_YEARS = int(os.getenv("SETUP_ELIGIBILITY_LOOKBACK_YEARS", "2") or "2")
+# Plan settings the method leaves open (stop distance beyond invalidation,
+# minimum reward/risk), trained walk-forward on the archive.
+PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in
+              os.getenv("SETUP_MULTIYEAR_PARAM_GRID", "0.5:2.0,1.0:2.0,1.0:3.0,1.5:3.0").split(",") if ":" in item]
 MULTIYEAR = {
     "stocks": {"module": "alpaca_setup", "sides": ("long",)},
     "options": {"module": "alpaca_options_setup", "sides": ("long", "short")},
 }
 
 
-def _multiyear_symbol(args: tuple[str, str, tuple[str, ...]]) -> pd.DataFrame:
-    """One symbol's full-archive replay through its bot's own module."""
-    sym, module, sides = args
+def _multiyear_symbol(args: tuple) -> pd.DataFrame:
+    """One symbol's full-archive replay through its bot's own module, once
+    per plan setting (data loaded once)."""
+    sym, module, sides = args[:3]
+    grid = args[3] if len(args) > 3 else [None]
     try:
         os.nice(15)
     except (AttributeError, OSError):
@@ -251,10 +257,18 @@ def _multiyear_symbol(args: tuple[str, str, tuple[str, ...]]) -> pd.DataFrame:
         return pd.DataFrame()
     lead_sym = m.leader_for(sym)
     lead = alpaca_sip_history.load(lead_sym)
-    t = m.replay(m.regular_session_candles(bars), sides=sides, fee_rate_roundtrip=0.0, spread_bps=m.SPREAD_BPS,
-                 entry_allowed=m.entry_allowed, force_exit=m.must_be_flat,
-                 leader_df=m.regular_session_candles(lead) if not lead.empty else None, leader_symbol=lead_sym)
-    return t.assign(symbol=sym) if not t.empty else t
+    rth, lead_rth = m.regular_session_candles(bars), (m.regular_session_candles(lead) if not lead.empty else None)
+    default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
+    frames = []
+    for setting in grid:
+        stop_buffer, min_rr = setting or default
+        m.STOP_BUFFER_ATR15, m.MIN_RR = stop_buffer, min_rr
+        t = m.replay(rth, sides=sides, fee_rate_roundtrip=0.0, spread_bps=m.SPREAD_BPS, entry_allowed=m.entry_allowed,
+                     force_exit=m.must_be_flat, leader_df=lead_rth, leader_symbol=lead_sym)
+        if not t.empty:
+            frames.append(t.assign(symbol=sym, param=f"{stop_buffer}:{min_rr}"))
+    m.STOP_BUFFER_ATR15, m.MIN_RR = default
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _trade_stats(x: pd.Series) -> dict[str, Any]:
@@ -301,6 +315,47 @@ def walk_forward_eligibility(trades: pd.DataFrame, *, min_trades: int = ELIGIBIL
             "rule": f">= {min_trades} trades and average net > 0 over the prior {lookback_years} years"}
 
 
+def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades: int = ELIGIBILITY_MIN_TRADES,
+                         lookback_years: int = ELIGIBILITY_LOOKBACK_YEARS, min_train_trades: int = 30) -> dict[str, Any]:
+    """Each year, choose the plan setting and the eligible symbols from the
+    prior `lookback_years` only (the setting whose eligible symbols made the
+    most in that window), then trade exactly that on the year itself. The
+    out-of-sample record is what training would actually have earned."""
+    t = trades.copy()
+    t["year"] = pd.to_datetime(t["entry_ts"], unit="s", utc=True).dt.year
+
+    def choose(window: pd.DataFrame) -> tuple[str | None, set[str], float]:
+        best: tuple[str | None, set[str], float] = (None, set(), float("-inf"))
+        for param, g in window.groupby("param"):
+            per = g.groupby("symbol")["net_return"].agg(["size", "mean"])
+            eligible = set(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
+            picked = g[g["symbol"].isin(eligible)]["net_return"]
+            if len(picked) >= min_train_trades and picked.sum() > best[2]:
+                best = (str(param), eligible, float(picked.sum()))
+        return best
+
+    years, oos = [], []
+    for y in range(int(t["year"].min()) + lookback_years, int(t["year"].max()) + 1):
+        param, eligible, _ = choose(t[(t["year"] >= y - lookback_years) & (t["year"] < y)])
+        test = t[(t["year"] == y) & (t["param"] == param) & (t["symbol"].isin(eligible))] if param else t.iloc[0:0]
+        oos.append(test)
+        years.append({"year": y, "param": param, "eligible": len(eligible), "result": _trade_stats(test["net_return"])})
+    oos_all = pd.concat(oos, ignore_index=True) if oos else pd.DataFrame(columns=["net_return"])
+    first = int(t["year"].min()) + lookback_years
+    baseline = t[(t["year"] >= first) & (t["param"] == default_param)]
+    trained, base = _trade_stats(oos_all["net_return"]), _trade_stats(baseline["net_return"])
+    positive_years = sum(1 for y in years if (y["result"].get("avg") or 0) > 0)
+    latest = int(t["year"].max())
+    param_now, eligible_now, _ = choose(t[t["year"] > latest - lookback_years])
+    enforce = bool(trained.get("trades", 0) >= 30 and (trained.get("avg") or 0) > 0
+                   and (trained.get("avg") or 0) > (base.get("avg") or 0) and positive_years * 2 >= len(years))
+    stop_buffer, min_rr = (float(x) for x in param_now.split(":")) if param_now else (None, None)
+    return {"years": years, "out_of_sample": trained, "default_every_symbol": base, "positive_years": positive_years,
+            "test_years": len(years), "param_now": {"STOP_BUFFER_ATR15": stop_buffer, "MIN_RR": min_rr},
+            "eligible_now": sorted(eligible_now), "enforce": enforce,
+            "rule": f"setting and symbols chosen on the prior {lookback_years} years: >= {min_trades} trades, average net > 0"}
+
+
 def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     from concurrent.futures import ProcessPoolExecutor
 
@@ -314,7 +369,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
     from concurrent.futures import as_completed
     with ProcessPoolExecutor(MULTIYEAR_WORKERS) as pool:
-        futures = {pool.submit(_multiyear_symbol, (sym, cfg["module"], cfg["sides"])): sym for sym in symbols}
+        futures = {pool.submit(_multiyear_symbol, (sym, cfg["module"], cfg["sides"], PARAM_GRID or [None])): sym for sym in symbols}
         done = 0
         for fut in as_completed(futures):
             done += 1
@@ -332,10 +387,18 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
             }), encoding="utf-8")
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
+                              "grid": [f"{a}:{b}" for a, b in PARAM_GRID],
                               "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
     if not trades.empty:
-        result["all_trades"] = summarize(trades, "net_return")
-        result["walk_forward"] = walk_forward_eligibility(trades)
+        import importlib
+        mod = importlib.import_module(f"data.{cfg['module']}")
+        default_param = f"{mod.STOP_BUFFER_ATR15}:{mod.MIN_RR}"
+        base = trades[trades["param"] == default_param] if "param" in trades and default_param in set(trades["param"]) else trades
+        result["default_param"] = default_param
+        result["all_trades"] = summarize(base, "net_return")
+        result["walk_forward"] = walk_forward_eligibility(base)
+        if "param" in trades and trades["param"].nunique() > 1:
+            result["trained"] = walk_forward_trained(trades, default_param=default_param)
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
     if not trades.empty:
@@ -346,16 +409,24 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     return result
 
 
+def _eligibility_from(result: dict[str, Any]) -> dict[str, Any]:
+    """What the bot enforces: the trained setting + symbols when training
+    beat the untrained walk-forward out of sample, else the plain list."""
+    wf, tr = result.get("walk_forward") or {}, result.get("trained") or {}
+    use_trained = bool(tr.get("enforce") and (tr.get("out_of_sample", {}).get("avg") or 0) > (wf.get("out_of_sample", {}).get("avg") or 0))
+    src = tr if use_trained else wf
+    return {"enforce": bool(src.get("enforce")), "symbols": src.get("eligible_now", []), "rule": src.get("rule"),
+            "params": tr.get("param_now") if use_trained else None, "source": "trained" if use_trained else "walk_forward",
+            "computed_at": result.get("computed_at"), "out_of_sample": src.get("out_of_sample"), "grid": result.get("grid")}
+
+
 def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
     token = os.getenv("HF_API_KEY", "")
     if not token:
         return False
     try:
         from huggingface_hub import CommitOperationAdd, HfApi
-        wf = result.get("walk_forward") or {}
-        eligibility = {"enforce": wf.get("enforce", False), "symbols": wf.get("eligible_now", []), "rule": wf.get("rule"),
-                       "computed_at": result["computed_at"], "out_of_sample": wf.get("out_of_sample"),
-                       "every_symbol": wf.get("every_symbol")}
+        eligibility = _eligibility_from(result)
         ops = [CommitOperationAdd("setup_strategy/multiyear/report.json", json.dumps(result, indent=2, default=str).encode()),
                CommitOperationAdd("setup_strategy/multiyear/trades.parquet", str(LOCAL_DIR / f"{bot}_multiyear_trades.parquet")),
                CommitOperationAdd("setup_strategy/eligibility.json", json.dumps(eligibility, indent=2).encode())]
@@ -407,7 +478,8 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     """Checked every few minutes on the Space: launch this bot's study once
     the archive is complete, if it has no published study yet and no other
     study is running (one study at a time gets every core)."""
-    if eligibility(bot) is not None:
+    current = eligibility(bot)
+    if current is not None and current.get("grid") == [f"{a}:{b}" for a, b in PARAM_GRID]:
         return {"ok": True, "action": "already_published"}
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
@@ -431,6 +503,11 @@ def multiyear_status(bot: str) -> dict[str, Any]:
         out["latest"]["walk_forward"] = {k: wf.get(k) for k in ("out_of_sample", "every_symbol", "positive_years", "test_years",
                                                                  "enforce", "rule", "years")}
         out["latest"]["walk_forward"]["eligible_now"] = len(wf.get("eligible_now") or [])
+        tr = (json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8")).get("trained") or {})
+        if tr:
+            out["latest"]["trained"] = {k: tr.get(k) for k in ("out_of_sample", "default_every_symbol", "positive_years",
+                                                                "test_years", "param_now", "enforce", "years")}
+            out["latest"]["trained"]["eligible_now"] = len(tr.get("eligible_now") or [])
     out["running"] = _running(f"{bot}_multiyear")
     return out
 
@@ -446,10 +523,7 @@ def eligibility(bot: str) -> dict[str, Any] | None:
     data = None
     local = LOCAL_DIR / f"{bot}_multiyear.json"
     try:
-        body = json.loads(local.read_text(encoding="utf-8"))
-        wf = body.get("walk_forward") or {}
-        data = {"enforce": wf.get("enforce", False), "symbols": wf.get("eligible_now", []), "rule": wf.get("rule"),
-                "computed_at": body.get("computed_at")}
+        data = _eligibility_from(json.loads(local.read_text(encoding="utf-8")))
     except Exception:
         token = os.getenv("HF_API_KEY", "")
         if token:

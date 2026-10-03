@@ -331,6 +331,11 @@ def evaluate_setup_candidate(symbol: str, *, company_name: str | None = None,
     # this on and the bot skips the rest.
     from data import setup_backtest_job
     elig = setup_backtest_job.eligibility("stocks")
+    if elig and elig.get("enforce") and elig.get("params"):
+        # The plan settings trained walk-forward on the archive.
+        for key, value in elig["params"].items():
+            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
+                setattr(alpaca_setup, key, float(value))
     if elig and elig.get("enforce") and symbol not in set(elig.get("symbols") or []):
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"symbol": symbol, "entry_system": "setup", "should_enter": False, "score": 0.0, "model_ok": False,
