@@ -310,10 +310,26 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
                else list(alpaca_options_data.OPTIONS_UNDERLYINGS))
     started = time.time()
     frames = []
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
+    from concurrent.futures import as_completed
     with ProcessPoolExecutor(MULTIYEAR_WORKERS) as pool:
-        for t in pool.map(_multiyear_symbol, [(sym, cfg["module"], cfg["sides"]) for sym in symbols]):
+        futures = {pool.submit(_multiyear_symbol, (sym, cfg["module"], cfg["sides"])): sym for sym in symbols}
+        done = 0
+        for fut in as_completed(futures):
+            done += 1
+            try:
+                t = fut.result()
+            except Exception as exc:
+                logger.warning("[setup_backtest] multi-year replay failed for %s: %s", futures[fut], exc)
+                t = pd.DataFrame()
             if not t.empty:
                 frames.append(t)
+            progress_path.write_text(json.dumps({
+                "bot": bot, "done": done, "total": len(symbols), "trades_so_far": int(sum(len(f) for f in frames)),
+                "workers": MULTIYEAR_WORKERS, "started_at": dt.datetime.fromtimestamp(started, dt.timezone.utc).isoformat(),
+                "elapsed_sec": round(time.time() - started), "last_symbol": futures[fut],
+            }), encoding="utf-8")
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
                               "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
@@ -349,6 +365,25 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
     except Exception as exc:
         logger.warning("[setup_backtest] multi-year publish failed for %s: %s", bot, exc)
         return False
+
+
+def multiyear_status(bot: str) -> dict[str, Any]:
+    """Progress of a running study and the latest finished one."""
+    out: dict[str, Any] = {"bot": bot}
+    for key, name in (("progress", f"{bot}_multiyear_progress.json"), ("latest", f"{bot}_multiyear.json")):
+        try:
+            out[key] = json.loads((LOCAL_DIR / name).read_text(encoding="utf-8"))
+        except Exception:
+            out[key] = None
+    if out["latest"]:
+        wf = out["latest"].get("walk_forward") or {}
+        out["latest"] = {k: out["latest"].get(k) for k in ("computed_at", "seconds", "symbols", "all_trades", "published")}
+        out["latest"]["walk_forward"] = {k: wf.get(k) for k in ("out_of_sample", "every_symbol", "positive_years", "test_years",
+                                                                 "enforce", "rule", "years")}
+        out["latest"]["walk_forward"]["eligible_now"] = len(wf.get("eligible_now") or [])
+    pid_file = LOCAL_DIR / f"{bot}_multiyear.pid"
+    out["running"] = pid_file.exists()
+    return out
 
 
 _eligibility_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}

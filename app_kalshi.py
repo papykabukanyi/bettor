@@ -2334,6 +2334,15 @@ def api_setup_backtest(bot: str):
                     "latest": setup_backtest_job.latest(bot)})
 
 
+@app.route("/api/setup-study/<bot>", methods=["GET"])
+def api_setup_study(bot: str):
+    """The multi-year setup study for the stock or options bot: live
+    progress while it runs, and the walk-forward result once published."""
+    if bot not in setup_backtest_job.MULTIYEAR:
+        return jsonify({"ok": False, "error": "unknown bot"}), 404
+    return jsonify({"ok": True, **setup_backtest_job.multiyear_status(bot)})
+
+
 @app.route("/api/perps/spot-lead", methods=["GET", "POST"])
 def api_perps_spot_lead():
     """GET: the Coinbase spot-lead predictor -- certification, out-of-sample
