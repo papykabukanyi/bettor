@@ -119,3 +119,35 @@ def test_15m_windows_settle_on_the_real_close_and_price_contracts_at_fair_value(
     assert row.result == "yes" and row.exit == "settled" and row.minute == 1
     assert row.pnl_per_contract == pytest.approx(1.0 - row.ask - __import__("data.kalshi_15m", fromlist=["x"]).taker_fee_usd(10, row.ask) / 10)
     assert row.net_return == pytest.approx(row.pnl_per_contract / row.ask) and row.leader_dir == "up"
+
+
+@pytest.mark.parametrize("module_name", ["perps_setup", "kalshi_15m_setup"])
+def test_the_setting_free_cache_changes_nothing_but_the_work(module_name):
+    """Every plan setting's replay is identical with and without the cache,
+    and the cache answers most bars after the first setting."""
+    import importlib
+    from pathlib import Path
+    m = importlib.import_module(f"data.{module_name}")
+    candles = pd.read_parquet(Path(__file__).parent / "fixtures" / "setup_btc_1m.parquet")
+    default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
+    grid = [(0.5, 1.5), (1.0, 2.0), (2.0, 4.0)]
+
+    def run():
+        out = []
+        for sb, rr in grid:
+            m.STOP_BUFFER_ATR15, m.MIN_RR = sb, rr
+            if module_name == "perps_setup":
+                t = m.replay(candles, sides=("long", "short"), fee_rate_roundtrip=0.0008, spread_bps=10.0)
+            else:
+                t = m.replay_windows(candles, half_spread=0.01)
+            out.append(t.reset_index(drop=True))
+        m.STOP_BUFFER_ATR15, m.MIN_RR = default
+        return out
+
+    plain = run()
+    with job._SettingFreeCache(m) as cache:  # noqa: SLF001
+        cached = run()
+    assert m.evaluate is cache.original
+    for a, b in zip(plain, cached):
+        pd.testing.assert_frame_equal(a, b)
+    assert cache.hits > cache.misses

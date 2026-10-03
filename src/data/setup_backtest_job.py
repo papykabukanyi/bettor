@@ -239,6 +239,42 @@ MULTIYEAR = {
 }
 
 
+class _SettingFreeCache:
+    """A setup module's evaluate, shared across the plan settings of one
+    symbol's study: a bar where every side fails a rule before the
+    reward/risk step comes out the same at every setting (the stop distance
+    and minimum reward/risk only enter the plan), so it is computed once and
+    remembered as a small marker; bars that reach the plan are evaluated per
+    setting. The replays only read `valid` (and the plan/setup_id of valid
+    results), so the marker is all they need."""
+
+    def __init__(self, module):
+        self.module, self.original = module, module.evaluate
+        self.early = set(module.CHECK_ORDER[:module.CHECK_ORDER.index("risk_reward")])
+        self.cache: dict[tuple, dict[str, Any]] = {}
+        self.hits = self.misses = 0
+
+    def __call__(self, ctx, as_of, **kw):
+        key = (int(as_of), tuple(kw.get("sides") or ()), kw.get("leader") is not None, bool(kw.get("require_leader")))
+        hit = self.cache.get(key)
+        if hit is not None:
+            self.hits += 1
+            return hit
+        self.misses += 1
+        r = self.original(ctx, as_of, **kw)
+        sides = r.get("by_side") or {}
+        if not r.get("valid") and all(side.get("reason") in self.early for side in sides.values()):
+            self.cache[key] = {"valid": False, "reason": r.get("reason")}
+        return r
+
+    def __enter__(self):
+        self.module.evaluate = self
+        return self
+
+    def __exit__(self, *exc):
+        self.module.evaluate = self.original
+
+
 def _multiyear_symbol(args: tuple) -> pd.DataFrame:
     """One symbol's full-archive replay through its bot's own module, once
     per plan setting (data loaded once)."""
@@ -260,13 +296,14 @@ def _multiyear_symbol(args: tuple) -> pd.DataFrame:
     rth, lead_rth = m.regular_session_candles(bars), (m.regular_session_candles(lead) if not lead.empty else None)
     default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
     frames = []
-    for setting in grid:
-        stop_buffer, min_rr = setting or default
-        m.STOP_BUFFER_ATR15, m.MIN_RR = stop_buffer, min_rr
-        t = m.replay(rth, sides=sides, fee_rate_roundtrip=0.0, spread_bps=m.SPREAD_BPS, entry_allowed=m.entry_allowed,
-                     force_exit=m.must_be_flat, leader_df=lead_rth, leader_symbol=lead_sym)
-        if not t.empty:
-            frames.append(t.assign(symbol=sym, param=f"{stop_buffer}:{min_rr}"))
+    with _SettingFreeCache(m):
+        for setting in grid:
+            stop_buffer, min_rr = setting or default
+            m.STOP_BUFFER_ATR15, m.MIN_RR = stop_buffer, min_rr
+            t = m.replay(rth, sides=sides, fee_rate_roundtrip=0.0, spread_bps=m.SPREAD_BPS, entry_allowed=m.entry_allowed,
+                         force_exit=m.must_be_flat, leader_df=lead_rth, leader_symbol=lead_sym)
+            if not t.empty:
+                frames.append(t.assign(symbol=sym, param=f"{stop_buffer}:{min_rr}"))
     m.STOP_BUFFER_ATR15, m.MIN_RR = default
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -366,6 +403,7 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
     del archive
     default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
     frames = []
+    cache = _SettingFreeCache(m).__enter__()
     for setting in grid:
         m.STOP_BUFFER_ATR15, m.MIN_RR = setting
         if bot == "perps":
@@ -377,6 +415,7 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
                                  leader_symbol=lead_sym, session=session, leader_session=lead_session)
         if not t.empty:
             frames.append(_annotate(t, sym, news_idx).assign(symbol=sym, param=f"{setting[0]}:{setting[1]}"))
+    cache.__exit__()
     m.STOP_BUFFER_ATR15, m.MIN_RR = default
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
