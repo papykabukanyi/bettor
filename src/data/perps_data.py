@@ -281,6 +281,23 @@ def get_watchlist() -> list[str]:
     return list(KNOWN_PERP_TICKERS)
 
 
+def chartable_tickers() -> list[str]:
+    """Every active perp the setup system can read a real Alpaca chart for
+    (crypto on the Kraken US feed, commodities on their SIP ETF) -- the
+    setup system's scan universe. A perp without a chart can never pass the
+    data rule, so ranking it into a top-N watchlist only crowds out perps
+    that can trade."""
+    from data import kalshi_15m_setup, kalshi_15m_spot
+    try:
+        markets = _cached_list_margin_markets()
+        tickers = [m["ticker"] for m in markets if m.get("status") == "active" and m.get("ticker")]
+    except Exception as exc:
+        logger.warning("[perps_data] list_margin_markets failed, using known list: %s", exc)
+        tickers = list(KNOWN_PERP_TICKERS)
+    charted = set(kalshi_15m_spot.SPOT_PRODUCTS) | set(kalshi_15m_setup.METAL_CHART_SYMBOL)
+    return sorted(t for t in tickers if kalshi_15m_spot.chart_coin(coin_for_ticker(t)) in charted)
+
+
 def _candles_to_frame(candles: list[dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for c in candles:

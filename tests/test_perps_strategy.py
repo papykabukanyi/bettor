@@ -4089,6 +4089,7 @@ def _scan_state(tmp_path, monkeypatch, positions=None):
     strat._save_state({"positions": positions or [], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})  # noqa: SLF001
     monkeypatch.setattr(strat, "_available_balance_usd", lambda: 1000.0)
     monkeypatch.setattr(strat, "get_watchlist", lambda: ["KXBTCPERP"])
+    monkeypatch.setattr(strat, "chartable_tickers", lambda: ["KXBTCPERP"])
     monkeypatch.setattr(strat, "prewarm_sentiment", lambda coins, use_limited_sources=True: None)
 
 

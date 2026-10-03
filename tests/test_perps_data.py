@@ -712,3 +712,11 @@ def test_first_perps_push_after_a_restart_keeps_the_days_earlier_hf_rows(tmp_pat
     monkeypatch.setattr(server_common, "call_with_hard_timeout", lambda fn, timeout_sec: str(earlier))
     result = perps_data.push_dataset_snapshot(pd.DataFrame({"ticker": ["KXBTCPERP"], "ts": [2], "close": [1.1]}))
     assert result["rows_written"] == 2
+
+
+def test_the_setup_scan_covers_every_active_perp_alpaca_charts(monkeypatch):
+    from data import perps_data
+    markets = [{"ticker": t, "status": "active"} for t in ("KXBTCPERP", "KXSOLPERP", "KXNEARPERP", "KXWLDPERP", "KXKSHIBPERP", "KXGOLDPERP")]
+    markets.append({"ticker": "KXDOTPERP", "status": "inactive"})
+    monkeypatch.setattr(perps_data, "_cached_list_margin_markets", lambda: markets)
+    assert perps_data.chartable_tickers() == ["KXBTCPERP", "KXGOLDPERP", "KXKSHIBPERP", "KXSOLPERP"]

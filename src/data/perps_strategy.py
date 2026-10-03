@@ -88,7 +88,7 @@ from data.kalshi_perps import (
     get_margin_order, get_margin_positions,
 )
 from data.crypto_news import get_sentiment, prewarm_sentiment
-from data.perps_data import coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
+from data.perps_data import chartable_tickers, coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
 from data.perps_model import predict_direction
 from data import alpaca_news, global_correlation_monitor, perps_meta_model, perps_setup, perps_spot_lead, perps_trade_analysis, threads_post
 
@@ -1603,7 +1603,9 @@ def scan_for_entries(
     candidate's evaluation for observability. confidence_min/
     correlation_study_enabled/correlation_max_adjustment passed straight
     through to evaluate_candidate -- see its own docstring."""
-    watchlist = tickers or get_watchlist()
+    # The setup system scans every perp it has a real chart for; the legacy
+    # model scans the volume/volatility watchlist.
+    watchlist = tickers or (chartable_tickers() if ENTRY_SYSTEM == "setup" else get_watchlist())
     held = exclude or set()
     to_evaluate = [t for t in watchlist if t not in held]
     # See crypto_news.prewarm_sentiment's own docstring for the full,

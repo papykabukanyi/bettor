@@ -158,10 +158,11 @@ KALSHI_15M_METALS_DATA_COLLECT_MINUTES = max(1, int(os.getenv("KALSHI_15M_METALS
 # fast_check (a sub-minute stop-loss/take-profit reaction loop), nothing
 # here is latency-critical: a position's only exit is its window settling
 # at a fixed, known time, and a fresh window only opens every 15 minutes
-# anyway. Every 2 minutes is ample to catch a freshly-opened window with
-# still-plenty of MIN_SECONDS_TO_CLOSE_FOR_ENTRY left, and to book a
-# settlement promptly after it resolves.
-KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "2") or "2"))
+# anyway. Every minute: the setup system may enter at minutes 1-5 of a
+# window (MIN_SECONDS_TO_CLOSE_FOR_ENTRY), and the study replays an entry
+# check at each of those minutes -- a 2-minute cadence gave live trading
+# fewer chances than the strategy that was tested.
+KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "1") or "1"))
 # Off-hours-agnostic (crypto trades 24/7, unlike options) -- just a
 # different hour than perps_train (3 ET) and stocks/crypto/options' own
 # daily retrains, so this doesn't contend with any of them for CPU at the
@@ -2097,7 +2098,7 @@ def api_status():
         },
         "latest_cycle": latest_cycle,
         "latest_position_check": latest_position_check,
-        "watchlist": perps_data.get_watchlist(),
+        "watchlist": perps_data.chartable_tickers() if perps_strategy.ENTRY_SYSTEM == "setup" else perps_data.get_watchlist(),
         # Real diagnostic visibility: how many instruments the chart-study
         # layer actually has enough history for right now, vs. how many it
         # knows about at all -- surfaces a real data-pipeline gap (most
