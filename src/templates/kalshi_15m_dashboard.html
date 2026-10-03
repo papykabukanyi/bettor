@@ -123,6 +123,8 @@
   <h3>Strategy Evidence &mdash; this bot's rules re-tested daily on real data (on the HF Space)</h3>
   <p class="setup-note" id="setup-evidence-note">Waiting for the first daily replay&hellip;</p>
   <p class="setup-note" id="setup-gate-note"></p>
+  <p class="setup-note" id="market-data-note"></p>
+  <p class="setup-note" id="study-note"></p>
   <div class="scroll-x">
     <table>
       <thead><tr><th>Version</th><th>Trades</th><th>Win rate</th><th>Avg per trade</th><th>Total</th><th>Profit factor</th><th>t-stat</th><th>First half avg</th><th>Second half avg</th></tr></thead>
@@ -221,7 +223,7 @@
   <h3>Data Feeds</h3>
   <div class="config-grid">
     <div><span class="k">Kalshi quote history (last collect)</span><span class="v" id="feed-quotes">--</span></div>
-    <div><span class="k">Coinbase spot (last collect)</span><span class="v" id="feed-spot">--</span></div>
+    <div><span class="k">Alpaca spot (last collect)</span><span class="v" id="feed-spot">--</span></div>
     <div><span class="k">Spot vs Kalshi settlements</span><span class="v" id="feed-validation">--</span></div>
     <div><span class="k">Edge model built</span><span class="v" id="feed-model">--</span></div>
     <div><span class="k">Last scan</span><span class="v" id="feed-scan">--</span></div>
@@ -564,6 +566,8 @@ async function refreshStatus() {
     document.getElementById("ev-scan-section").style.display = setupMode ? "none" : "";
     document.querySelectorAll(".ev-only").forEach(el => { el.style.display = setupMode ? "none" : ""; });
     try { renderSetupGate(data.setup_evidence_gate); } catch (e) { console.error("gate render failed", e); }
+    try { renderAlpacaData(data.market_data); } catch (e) { console.error("market data render failed", e); }
+    loadStudy("kalshi15m");
     try { renderSetupEvidence(data.setup_backtest); } catch (e) { console.error("setup evidence render failed", e); }
     try { renderSetupChecklist((data.last_scan || {}).checks, p.setup_min_rr); } catch (e) { console.error("setup checklist render failed", e); }
     renderAccuracy("acc-crypto", markets.crypto);
@@ -720,6 +724,38 @@ function renderSetupChecklist(rows, minRr) {
   }).join("");
 }
 
+function renderAlpacaData(md) {
+  const el = document.getElementById("market-data-note");
+  if (!el || !md) return;
+  const s = md.streams || {};
+  const one = (name, st) => !st ? `${name} stream off` : st.connected
+    ? `${name} stream live (${st.subscribed} bars${st.subscribed_ticks ? ", " + st.subscribed_ticks + " live ticks" : ""}${st.last_bar_age_sec != null ? ", last bar " + Math.round(st.last_bar_age_sec) + "s ago" : ""})`
+    : `${name} stream reconnecting`;
+  const n = md.news || {};
+  const news = n.connected ? `news stream live (${n.stored_articles || 0} articles held)` : "news stream connecting";
+  const bad = [s.crypto, s.stocks].some(st => st && !st.connected);
+  el.innerHTML = `Market data: <b>Alpaca only</b> &mdash; crypto on ${setupEsc(md.crypto_venue || "Kraken US via Alpaca")}, commodities on SIP ETFs, news from Benzinga. `
+    + `<span style="color:${bad ? "var(--red)" : "inherit"}">${setupEsc(one("crypto", s.crypto))} &middot; ${setupEsc(one("stocks", s.stocks))} &middot; ${setupEsc(news)}</span>`;
+}
+async function loadStudy(bot) {
+  const el = document.getElementById("study-note");
+  if (!el) return;
+  try {
+    const r = await (await fetch(`/api/setup-study/${bot}`)).json();
+    const pct = x => x == null ? "--" : (x * 100).toFixed(3) + "%";
+    if (r.running && r.progress) {
+      el.innerHTML = `Multi-year study (Alpaca archives, 16 plan settings &times; every coin &times; hour / weekday / news / leader): running, ${r.progress.done}/${r.progress.total} symbols, ${r.progress.trades_so_far} trades so far.`;
+      return;
+    }
+    const p = (r.latest || {}).patterns;
+    if (!p) { el.innerHTML = "Multi-year study (Alpaca archives): waits for the crypto and news archives, then runs on the Space's cores (one study at a time)."; return; }
+    const blocked = Object.entries(p.blocked_now || {}).map(([f, b]) => `${f}: ${b.join(", ")}`).join("; ") || "none";
+    el.innerHTML = `Multi-year study, scored only on years it never saw: learned setting + coins ${pct((p.trained || {}).avg)} per trade over ${(p.trained || {}).trades || 0} trades; `
+      + `with learned entry conditions ${pct((p.with_patterns || {}).avg)} over ${(p.with_patterns || {}).trades || 0}; every trade at the old setting ${pct((p.default_every_symbol || {}).avg)}. `
+      + `${p.positive_years}/${p.test_years} unseen years positive. Losing conditions now: ${setupEsc(blocked)}. `
+      + `<span class="tag ${p.enforce ? "yes" : "no"}">${p.enforce ? "IN FORCE" : "NOT PROVEN YET"}</span>`;
+  } catch (e) { console.error("study render failed", e); }
+}
 function renderSetupGate(g) {
   const el = document.getElementById("setup-gate-note");
   if (!el || !g) return;
