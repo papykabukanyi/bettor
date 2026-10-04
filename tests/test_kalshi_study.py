@@ -94,6 +94,10 @@ def test_a_kalshi_study_symbol_is_replayed_per_setting_and_annotated(monkeypatch
     assert sorted(out.param) == ["1.0:2.0", "1.5:3.0"]
     assert set(out.news) == {"with"} and set(out.leader) == {"with"} and set(out.news_count) == {1.0}
     assert (perps_setup.STOP_BUFFER_ATR15, perps_setup.MIN_RR) == (1.5, 3.0)  # defaults restored
+    # One column per condition: the replay's own `side` once (a second copy
+    # broke every study's analysis -- "Grouper for 'side' not 1-dimensional").
+    assert list(out.columns).count("side") == 1
+    job.learn_blocked(out, min_trades=1)
 
 
 def test_15m_windows_settle_on_the_real_close_and_price_contracts_at_fair_value(monkeypatch):

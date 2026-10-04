@@ -290,3 +290,59 @@ def test_a_restarted_study_restores_its_finished_replays_from_hf(monkeypatch, tm
     assert list(parts) == ["BTC"] and len(parts["BTC"]) == len(_fake_part("BTC"))
     assert (job._parts_dir("perps") / "BTC.pkl").exists()  # noqa: SLF001 -- and kept locally from here on
     assert job._load_parts("perps", {"version": 3, "grid": ["1.0:2.0"]}) == {}  # noqa: SLF001 -- another study's replays are not reused
+
+
+def test_replays_saved_with_a_doubled_column_still_analyse(monkeypatch):
+    """Parts kept by the run that had two `side` columns are read back with
+    one, so the restarted study finishes instead of failing again."""
+    monkeypatch.setattr(job, "_study_symbols", lambda bot: ["BTC"])
+    monkeypatch.setattr(job, "study_grid", lambda bot: [(1.0, 2.0)])
+    job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": ["1.0:2.0"]})  # noqa: SLF001
+    part = _fake_part("BTC")
+    doubled = pd.concat([part, part[["side"]]], axis=1)
+    doubled.to_pickle(job._parts_dir("perps") / "BTC.pkl")  # noqa: SLF001 -- as the failed run left it
+    result = job.run_multiyear("perps", publish=False)
+    assert result["ok"] and "patterns" in result and "side" in result["patterns"]["by_condition"]
+
+
+def test_a_weekly_refresh_waits_for_the_running_study(monkeypatch):
+    """The weekly timers queued their study straight away -- three ran at
+    once on the Space's cores. A refresh now waits its turn."""
+    launched, running = [], {"perps_multiyear"}
+    monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or running.add(name) or {"action": "launched"})
+    monkeypatch.setattr(job, "_running", lambda name: name in running)
+    monkeypatch.setattr(job, "archive_ready", lambda bot: True)
+    assert job.request_multiyear("crypto")["action"] == "a_study_is_running" and launched == []
+    running.clear()
+    assert job.maybe_start_multiyear("crypto")["action"] == "launched" and launched == ["crypto_multiyear"]
+    assert not (job.LOCAL_DIR / "crypto_multiyear.queued").exists()
+
+
+def test_a_failed_study_is_not_relaunched_in_a_loop(monkeypatch):
+    launched = []
+    monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    monkeypatch.setattr(job, "archive_ready", lambda bot: True)
+    monkeypatch.setattr(job, "eligibility", lambda bot: None)
+    job._write_error("perps_multiyear", "Traceback ...")  # noqa: SLF001
+    assert job.maybe_start_multiyear("perps")["action"] == "failed_recently" and launched == []
+    import os as _os
+    old = __import__("time").time() - (job.FAILED_RETRY_HOURS + 1) * 3600
+    _os.utime(job.LOCAL_DIR / "perps_multiyear_error.json", (old, old))
+    assert job.maybe_start_multiyear("perps")["action"] == "launched"
+
+
+def test_a_failed_run_stops_its_workers():
+    """A study that failed kept its pool replaying beside its relaunch."""
+    import time as _t
+    from concurrent.futures import ProcessPoolExecutor
+    pool = ProcessPoolExecutor(1)
+    pool.submit(_t.sleep, 60)
+    deadline = _t.time() + 30
+    while not pool._processes and _t.time() < deadline:  # noqa: SLF001
+        _t.sleep(0.1)
+    procs = list(pool._processes.values())  # noqa: SLF001
+    job._stop_pool(pool)  # noqa: SLF001
+    for proc in procs:
+        proc.join(10)
+        assert not proc.is_alive()

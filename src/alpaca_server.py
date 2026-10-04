@@ -745,7 +745,7 @@ def _ensure_background_jobs_started() -> None:
             from data import setup_backtest_job
             # Weekly multi-year study over the SIP archive (and once after a
             # deploy if none is published yet): symbol eligibility.
-            scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week="sat", hour=6, minute=0, args=["stocks_multiyear"],
+            scheduler.add_job(setup_backtest_job.request_multiyear, "cron", day_of_week="sat", hour=6, minute=0, args=["stocks"],
                               id="stocks_multiyear_study", replace_existing=True)
             scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=["stocks"],
                               id="stocks_multiyear_startup", replace_existing=True,

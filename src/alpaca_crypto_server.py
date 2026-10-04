@@ -677,8 +677,8 @@ def _ensure_background_jobs_started() -> None:
             # trained plan setting, the pairs with a profitable record and
             # the entry conditions (hour, weekday, news, leader, volatility,
             # US market) that lost -- one study at a time on the Space.
-            scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week="sun", hour=12, minute=0,
-                              args=["crypto_multiyear"], id="crypto_multiyear_study", replace_existing=True)
+            scheduler.add_job(setup_backtest_job.request_multiyear, "cron", day_of_week="sun", hour=12, minute=0,
+                              args=["crypto"], id="crypto_multiyear_study", replace_existing=True)
             scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=["crypto"],
                               id="crypto_multiyear_startup", replace_existing=True,
                               next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(

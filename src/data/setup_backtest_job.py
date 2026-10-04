@@ -486,7 +486,14 @@ def _annotate(trades: pd.DataFrame, sym: str, news_idx, regimes: list[str] | Non
                                      leader_corr=getattr(r, "leader_corr", None), leader_dir=getattr(r, "leader_dir", None),
                                      vol_regime=regimes[k] if regimes else None, us_market=us_market[k] if us_market else None)
                     | {"news_count": n["count"], "news_score": n["score"]})
-    return pd.concat([trades.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
+    feats = pd.DataFrame(rows)
+    # The replay already carries `side` (and the same value): one column each.
+    feats = feats.drop(columns=[c for c in feats.columns if c in trades.columns])
+    return pd.concat([trades.reset_index(drop=True), feats], axis=1)
+
+
+def _one_column_each(df: pd.DataFrame) -> pd.DataFrame:
+    return df.loc[:, ~df.columns.duplicated()] if df.columns.duplicated().any() else df
 
 
 def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
@@ -830,7 +837,7 @@ def _restore_parts_from_hf(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFr
         for f in api.list_repo_files(repo, repo_type="model"):
             if f.startswith(f"{PARTS_PATH}/") and f.endswith(".parquet"):
                 sym = f.rsplit("/", 1)[1][: -len(".parquet")].replace("__", "/")
-                out[sym] = pd.read_parquet(hf_hub_download(repo, f, repo_type="model", token=token))
+                out[sym] = _one_column_each(pd.read_parquet(hf_hub_download(repo, f, repo_type="model", token=token)))
         return out
     return _hf_parts(fetch, timeout_sec=600)
 
@@ -868,21 +875,27 @@ def _load_parts(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFrame]:
     done = {}
     for f in d.glob("*.pkl"):
         try:
-            done[f.stem.replace("__", "/")] = pd.read_pickle(f)
+            done[f.stem.replace("__", "/")] = _one_column_each(pd.read_pickle(f))
         except Exception:
             f.unlink(missing_ok=True)
     return done
 
 
 def _save_part(bot: str, sym: str, trades: pd.DataFrame, *, upload: bool = True) -> None:
+    """Keep one symbol's replay (local disk, and the bot's HF repo) --
+    best effort: a failed save never stops the study."""
     name = sym.replace("/", "__")
-    tmp = _parts_dir(bot) / f"{name}.pkl.tmp"
-    trades.to_pickle(tmp)
-    tmp.rename(tmp.with_suffix(""))
-    if upload:
-        data = _part_bytes(trades)
-        _hf_parts(lambda api: api.upload_file(path_or_fileobj=data, path_in_repo=f"{PARTS_PATH}/{name}.parquet", repo_id=REPOS[bot],
-                                              repo_type="model", commit_message=f"{bot} study: {sym} replayed"))
+    trades = _one_column_each(trades)
+    try:
+        tmp = _parts_dir(bot) / f"{name}.pkl.tmp"
+        trades.to_pickle(tmp)
+        tmp.rename(tmp.with_suffix(""))
+        if upload:
+            data = _part_bytes(trades)
+            _hf_parts(lambda api: api.upload_file(path_or_fileobj=data, path_in_repo=f"{PARTS_PATH}/{name}.parquet", repo_id=REPOS[bot],
+                                                  repo_type="model", commit_message=f"{bot} study: {sym} replayed"))
+    except Exception as exc:
+        logger.warning("[setup_backtest] could not keep %s's %s replay: %s", bot, sym, exc)
 
 
 def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
@@ -925,19 +938,20 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
         jobs = {sym: (_multiyear_symbol, (sym, cfg["module"], cfg["sides"], grid or [None])) for sym in todo}
     if jobs:
         pool = ProcessPoolExecutor(MULTIYEAR_WORKERS)
-        futures = {pool.submit(fn, args): sym for sym, (fn, args) in jobs.items()}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                t = fut.result()
-            except Exception as exc:
-                logger.warning("[setup_backtest] multi-year replay failed for %s: %s", sym, exc)
-                t = pd.DataFrame()
-            parts[sym] = t
-            _save_part(bot, sym, t)
-            mark(done=len(parts), last_symbol=sym)
-        # Every result is in: never wait on the workers' exit.
-        pool.shutdown(wait=False, cancel_futures=True)
+        try:
+            futures = {pool.submit(fn, args): sym for sym, (fn, args) in jobs.items()}
+            for fut in as_completed(futures):
+                sym = futures[fut]
+                try:
+                    t = fut.result()
+                except Exception as exc:
+                    logger.warning("[setup_backtest] multi-year replay failed for %s: %s", sym, exc)
+                    t = pd.DataFrame()
+                parts[sym] = _one_column_each(t)
+                _save_part(bot, sym, t)
+                mark(done=len(parts), last_symbol=sym)
+        finally:
+            _stop_pool(pool)
     mark(stage="analysing")
     frames = [t for t in parts.values() if not t.empty]
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -962,10 +976,25 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     return result
 
 
+def _stop_pool(pool) -> None:
+    """Shut the study's worker pool now: never wait on its workers, and
+    stop any still replaying (only after a failure)."""
+    procs = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for proc in procs:
+        try:
+            if proc.is_alive():
+                proc.terminate()
+        except Exception:
+            pass
+
+
 def _analyse_multiyear(bot: str, trades: pd.DataFrame, *, symbols: list[str], grid: list, started: float,
                        mark=lambda **kw: None) -> dict[str, Any]:
     """Every replayed trade -> the walk-forward record the bot learns from."""
     import importlib
+
+    trades = _one_column_each(trades)
 
     cfg = MULTIYEAR[bot]
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
@@ -1176,10 +1205,34 @@ def _running(name: str) -> bool:
     return False
 
 
+FAILED_RETRY_HOURS = float(os.getenv("SETUP_MULTIYEAR_RETRY_HOURS", "6") or "6")
+
+
+def request_multiyear(bot: str) -> dict[str, Any]:
+    """The weekly refresh: queue this bot's study; it starts as soon as no
+    other study is running (never two at once on the Space's cores)."""
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    (LOCAL_DIR / f"{bot}_multiyear.queued").write_text(dt.datetime.now(dt.timezone.utc).isoformat(), encoding="utf-8")
+    return maybe_start_multiyear(bot)
+
+
 def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     """Checked every few minutes on the Space: launch this bot's study once
-    the archive is complete, if it has no published study yet and no other
-    study is running (one study at a time gets every core)."""
+    the archive is complete, if it has no published study yet (or a weekly
+    refresh is queued) and no other study is running (one study at a time
+    gets every core). A study that failed waits FAILED_RETRY_HOURS."""
+    queued = LOCAL_DIR / f"{bot}_multiyear.queued"
+    if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
+        return {"ok": True, "action": "a_study_is_running"}
+    err = LOCAL_DIR / f"{bot}_multiyear_error.json"
+    if err.exists() and time.time() - err.stat().st_mtime < FAILED_RETRY_HOURS * 3600:
+        return {"ok": True, "action": "failed_recently"}
+    if queued.exists():
+        if not archive_ready(bot):
+            return {"ok": True, "action": "waiting_for_archive"}
+        queued.unlink(missing_ok=True)
+        _eligibility_cache.pop(bot, None)
+        return launch(f"{bot}_multiyear")
     wanted = [f"{a}:{b}" for a, b in study_grid(bot)]
     version = STUDY_VERSION.get(bot, 1)
     try:
@@ -1193,8 +1246,6 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     current = eligibility(bot)
     if current is not None and current.get("grid") == wanted and current.get("version", 1) == version:
         return {"ok": True, "action": "already_published"}
-    if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
-        return {"ok": True, "action": "a_study_is_running"}
     if not archive_ready(bot):
         return {"ok": True, "action": "waiting_for_archive"}
     _eligibility_cache.pop(bot, None)

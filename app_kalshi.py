@@ -1661,8 +1661,8 @@ def _ensure_background_jobs_started() -> None:
             # entry conditions (hour, weekday, news, leader) that lost --
             # one study at a time on the Space's cores.
             for bot, weekday in (("perps", "sun"), ("kalshi15m", "sun")):
-                scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week=weekday,
-                                  hour=6 if bot == "perps" else 9, minute=0, args=[f"{bot}_multiyear"],
+                scheduler.add_job(setup_backtest_job.request_multiyear, "cron", day_of_week=weekday,
+                                  hour=6 if bot == "perps" else 9, minute=0, args=[bot],
                                   id=f"{bot}_multiyear_study", replace_existing=True)
                 scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=[bot],
                                   id=f"{bot}_multiyear_startup", replace_existing=True,
