@@ -197,7 +197,8 @@ def test_a_just_published_study_is_not_launched_again(monkeypatch):
     monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
     monkeypatch.setattr(job, "archive_ready", lambda bot: True)
     grid = [f"{a}:{b}" for a, b in job.study_grid("perps")]
-    (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "computed_at": "x"}))
+    (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "computed_at": "x",
+                                                                   "version": job.STUDY_VERSION.get("perps", 1)}))
     assert job.maybe_start_multiyear("perps")["action"] == "already_published" and launched == []
     assert job.eligibility("perps") is not None  # the newer result file refreshes the cache too
     job._eligibility_cache.pop("perps", None)  # noqa: SLF001

@@ -971,9 +971,17 @@ def _evaluate_candidate_setup(
     if setup.get("strike_underlying") is None:
         return {"ok": False, "reason": "no_strike_reference", **info}
     corr = (setup.get("checks") or {}).get("correlation") or {}
+    regime = "n/a"
+    thresholds = ((elig or {}).get("vol_thresholds") or {}).get(coin)
+    if thresholds:
+        try:
+            regime = setup_backtest_job.vol_regime_now(kalshi_15m_setup.underlying_candles(coin), thresholds,
+                                                       kalshi_15m_setup.session_for(coin))
+        except Exception as exc:
+            logger.debug("[kalshi_15m_strategy] volatility regime unavailable for %s: %s", coin, exc)
     info["entry_conditions"] = setup_backtest_job.pattern_features(
         ts=int(time.time()), side=setup["side"], news_count=news_count, news_score=news,
-        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"))
+        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"), vol_regime=regime)
     blocked = setup_backtest_job.blocked_reason(elig.get("blocked") if enforce else None, info["entry_conditions"])
     if blocked:
         return {"ok": False, "reason": f"learned_losing_condition:{blocked}", **info}

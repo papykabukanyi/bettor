@@ -20,7 +20,7 @@ def _local_dir(tmp_path, monkeypatch):
 
 def test_entry_conditions_are_bucketed_relative_to_the_trade():
     f = job.pattern_features(ts=T_SUN_10UTC, side="long", news_count=3, news_score=0.4, leader_corr=0.8, leader_dir="down")
-    assert f == {"hour_block": "h08", "weekday": "sun", "news": "with", "leader": "against"}
+    assert f == {"hour_block": "h08", "weekday": "sun", "news": "with", "leader": "against", "side": "long", "vol_regime": "n/a"}
     f = job.pattern_features(ts=T_SUN_10UTC, side="short", news_count=3, news_score=0.4, leader_corr=0.8, leader_dir="down")
     assert f["news"] == "against" and f["leader"] == "with"
     assert job.pattern_features(ts=T_SUN_10UTC, side="long", news_count=0, news_score=0.0, leader_corr=0.2,
@@ -176,3 +176,25 @@ def test_a_study_of_an_older_version_is_run_again(monkeypatch):
     launched.clear()
     (job.LOCAL_DIR / "kalshi15m_multiyear.json").write_text(_json.dumps({"grid": grid, "version": job.STUDY_VERSION["kalshi15m"]}))
     assert job.maybe_start_multiyear("kalshi15m")["action"] == "already_published" and launched == []
+
+
+
+def test_every_prior_year_teaches_each_year_with_the_expanding_window():
+    pt = job.walk_forward_patterns(_pattern_trades(), default_param="1.5:3.0", lookback_years=0)
+    assert [y["year"] for y in pt["years"]] == [2024, 2025, 2026]
+    assert all(y["blocked"] == {"weekday": ["sun"]} for y in pt["years"]) and pt["enforce"] is True
+    assert "every prior year" in pt["rule"]
+
+
+def test_volatility_regime_has_no_lookahead_and_matches_live():
+    rng = np.random.default_rng(3)
+    n = 1440 * 120
+    ts = 1_700_000_000 + 60 * np.arange(n)
+    sigma = np.where(np.arange(n) < n - 1440 * 5, 0.0005, 0.003)  # the last 5 days turn wild
+    close = 100 * np.exp(np.cumsum(rng.normal(0, sigma)))
+    candles = pd.DataFrame({"ts": ts, "open": close, "high": close, "low": close, "close": close, "volume": 1.0})
+    regimes, now = job.vol_regimes(candles, [ts[1440 * 100], ts[-1]], "utc_day")
+    assert regimes[0] in ("low", "normal", "high") and regimes[1] == "high"
+    assert now and now[0] < now[1]
+    assert job.vol_regime_now(candles.tail(2000), now, "utc_day") == "high"
+    assert job.vol_regime_now(candles.tail(2000), None, "utc_day") == "n/a"

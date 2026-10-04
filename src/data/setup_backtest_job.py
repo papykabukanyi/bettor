@@ -318,8 +318,10 @@ def _multiyear_symbol(args: tuple) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 KALSHI_STUDY_BOTS = ("perps", "kalshi15m")
 MULTIYEAR.update({
-    "perps": {"module": "perps_setup", "sides": ("long", "short"), "lookback": 1},
-    "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long", "short"), "lookback": 1},
+    # lookback 0: each year's choices are learned from every year before it
+    # (the whole archive, expanding), not only the last one.
+    "perps": {"module": "perps_setup", "sides": ("long", "short"), "lookback": 0},
+    "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long", "short"), "lookback": 0},
 })
 # The Kalshi bots search a wider plan grid: every stop distance x every
 # minimum reward/risk (16 settings), each crossed with every coin and the
@@ -327,7 +329,9 @@ MULTIYEAR.update({
 KALSHI_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
     "SETUP_MULTIYEAR_KALSHI_PARAM_GRID",
     ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
-PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader")
+PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader", "side", "vol_regime")
+VOL_WINDOW_BARS = {"utc_day": 1440, "us_equity": 390}  # one day of 1-minute bars
+VOL_LOOKBACK_DAYS = 90
 PATTERN_MIN_TRADES = int(os.getenv("SETUP_PATTERN_MIN_TRADES", "20") or "20")
 PATTERN_MAX_T = float(os.getenv("SETUP_PATTERN_MAX_T", "-1.0") or "-1.0")
 NEWS_HOURS = 6.0
@@ -335,10 +339,11 @@ _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def pattern_features(*, ts: int, side: str, news_count: float | None, news_score: float | None,
-                     leader_corr: float | None, leader_dir: str | None) -> dict[str, str]:
+                     leader_corr: float | None, leader_dir: str | None, vol_regime: str | None = None) -> dict[str, str]:
     """The conditions a trade entered in, bucketed the same way in the
     studies and live: 4-hour UTC block, weekday, the news over the prior
-    NEWS_HOURS relative to the trade's side, and the leader."""
+    NEWS_HOURS relative to the trade's side, the leader, the side itself and
+    the volatility regime (see vol_regimes)."""
     t = dt.datetime.fromtimestamp(int(ts), dt.timezone.utc)
     sign = 1.0 if side == "long" else -1.0
     if not news_count:
@@ -353,7 +358,8 @@ def pattern_features(*, ts: int, side: str, news_count: float | None, news_score
     else:
         implied = {"up": 1, "down": -1}.get(leader_dir, 0) * (1 if float(leader_corr) > 0 else -1)
         leader = "with" if implied == sign else ("mixed" if implied == 0 else "against")
-    return {"hour_block": f"h{t.hour // 4 * 4:02d}", "weekday": _WEEKDAYS[t.weekday()], "news": news, "leader": leader}
+    return {"hour_block": f"h{t.hour // 4 * 4:02d}", "weekday": _WEEKDAYS[t.weekday()], "news": news, "leader": leader,
+            "side": side, "vol_regime": vol_regime or "n/a"}
 
 
 def blocked_reason(blocked: dict[str, list[str]] | None, features: dict[str, str]) -> str | None:
@@ -372,12 +378,68 @@ def _study_candles(sym: str) -> tuple[pd.DataFrame, str]:
     return alpaca_crypto_history.candles(sym), "utc_day"
 
 
-def _annotate(trades: pd.DataFrame, sym: str, news_idx) -> pd.DataFrame:
+def _daily_vol(candles: pd.DataFrame, session: str) -> pd.Series:
+    """Rolling one-day realized volatility of 1-minute log returns, indexed
+    by candle end time."""
+    c = candles.sort_values("ts").drop_duplicates("ts")
+    r = np.log(c["close"].astype(float)).diff()
+    w = VOL_WINDOW_BARS.get(session, 1440)
+    return pd.Series(r.rolling(w, min_periods=w // 2).std().to_numpy(), index=c["ts"].to_numpy("int64"))
+
+
+def vol_prep(candles: pd.DataFrame, session: str) -> tuple | None:
+    """The coin's daily-volatility series and its rolling thirds over the
+    prior VOL_LOOKBACK_DAYS (sampled hourly) -- computed once per coin."""
+    v = _daily_vol(candles, session)
+    if v.dropna().empty:
+        return None
+    hourly = v.iloc[::60].dropna()
+    per_day = 24 if session == "utc_day" else 7
+    win = VOL_LOOKBACK_DAYS * per_day
+    q1 = hourly.rolling(win, min_periods=win // 3).quantile(1 / 3)
+    q2 = hourly.rolling(win, min_periods=win // 3).quantile(2 / 3)
+    return v, hourly, q1, q2
+
+
+def vol_regimes(candles: pd.DataFrame | None, entry_ts, session: str, *, prep: tuple | None = None) -> tuple[list[str], list[float] | None]:
+    """Each entry's volatility regime -- 'low' / 'normal' / 'high' by where
+    the last day's volatility sat in the thirds of the prior
+    VOL_LOOKBACK_DAYS (sampled hourly, no lookahead) -- and today's
+    thresholds [low|normal, normal|high] for the live bot."""
+    prep = prep if prep is not None else vol_prep(candles, session)
+    if prep is None:
+        return ["n/a"] * len(entry_ts), None
+    v, hourly, q1, q2 = prep
+    vi, hi = v.index.to_numpy(), hourly.index.to_numpy()
+    out = []
+    for ts in entry_ts:
+        i, j = int(np.searchsorted(vi, int(ts), side="right")) - 1, int(np.searchsorted(hi, int(ts), side="right")) - 1
+        if i < 0 or j < 0 or np.isnan(v.iat[i]) or np.isnan(q1.iat[j]) or np.isnan(q2.iat[j]):
+            out.append("n/a")
+            continue
+        out.append("low" if v.iat[i] < q1.iat[j] else "high" if v.iat[i] > q2.iat[j] else "normal")
+    now = [float(q1.iat[-1]), float(q2.iat[-1])] if not (np.isnan(q1.iat[-1]) or np.isnan(q2.iat[-1])) else None
+    return out, now
+
+
+def vol_regime_now(candles: pd.DataFrame | None, thresholds: list[float] | None, session: str) -> str:
+    """Live: the chart's last-day volatility against the study's thresholds."""
+    if candles is None or candles.empty or not thresholds:
+        return "n/a"
+    v = _daily_vol(candles, session).dropna()
+    if v.empty:
+        return "n/a"
+    x = float(v.iat[-1])
+    return "low" if x < thresholds[0] else "high" if x > thresholds[1] else "normal"
+
+
+def _annotate(trades: pd.DataFrame, sym: str, news_idx, regimes: list[str] | None = None) -> pd.DataFrame:
     rows = []
-    for r in trades.itertuples(index=False):
+    for k, r in enumerate(trades.itertuples(index=False)):
         n = news_idx.at(int(r.entry_ts), hours=NEWS_HOURS) if news_idx is not None else {"count": 0.0, "score": 0.0}
         rows.append(pattern_features(ts=int(r.entry_ts), side=r.side, news_count=n["count"], news_score=n["score"],
-                                     leader_corr=getattr(r, "leader_corr", None), leader_dir=getattr(r, "leader_dir", None))
+                                     leader_corr=getattr(r, "leader_corr", None), leader_dir=getattr(r, "leader_dir", None),
+                                     vol_regime=regimes[k] if regimes else None)
                     | {"news_count": n["count"], "news_score": n["score"]})
     return pd.concat([trades.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
 
@@ -404,6 +466,7 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
     del archive
     default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
     frames = []
+    vprep = vol_prep(candles, session)  # the coin's volatility, once for every setting
     cache = _SettingFreeCache(m).__enter__()
     for setting in grid:
         m.STOP_BUFFER_ATR15, m.MIN_RR = setting
@@ -416,7 +479,9 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
                                  leader_symbol=lead_sym, session=session, leader_session=lead_session,
                                  minute_average=m.settles_on_minute_average(sym))
         if not t.empty:
-            frames.append(_annotate(t, sym, news_idx).assign(symbol=sym, param=f"{setting[0]}:{setting[1]}"))
+            regimes, now = vol_regimes(None, t["entry_ts"].to_numpy("int64"), session, prep=vprep)
+            frames.append(_annotate(t, sym, news_idx, regimes).assign(
+                symbol=sym, param=f"{setting[0]}:{setting[1]}", vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
     cache.__exit__()
     m.STOP_BUFFER_ATR15, m.MIN_RR = default
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -493,6 +558,25 @@ def _choose_setting(window: pd.DataFrame, *, min_trades: int, min_train_trades: 
     return best
 
 
+def _train_window(t: pd.DataFrame, y: int, lookback_years: int) -> pd.DataFrame:
+    """The years a choice for year y is learned from: the prior
+    lookback_years, or with 0 every year before y (expanding window)."""
+    return t[(t["year"] < y) & ((t["year"] >= y - lookback_years) if lookback_years else True)]
+
+
+def _lookback_words(lookback_years: int) -> str:
+    return "every prior year" if not lookback_years else f"the prior {lookback_years} year(s)"
+
+
+def _first_test_year(t: pd.DataFrame, lookback_years: int) -> int:
+    return int(t["year"].min()) + (lookback_years or 1)
+
+
+def _recent(t: pd.DataFrame, lookback_years: int) -> pd.DataFrame:
+    """What today's choice is learned from: the last lookback_years, or all."""
+    return t[t["year"] > int(t["year"].max()) - lookback_years] if lookback_years else t
+
+
 def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_years: int,
                           min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30) -> dict[str, Any]:
     """Training on top of the trained setting and symbols: each year, also
@@ -503,8 +587,8 @@ def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_
     t = trades.copy()
     t["year"] = pd.to_datetime(t["entry_ts"], unit="s", utc=True).dt.year
     years, plain, filtered = [], [], []
-    for y in range(int(t["year"].min()) + lookback_years, int(t["year"].max()) + 1):
-        window = t[(t["year"] >= y - lookback_years) & (t["year"] < y)]
+    for y in range(_first_test_year(t, lookback_years), int(t["year"].max()) + 1):
+        window = _train_window(t, y, lookback_years)
         param, eligible, _ = _choose_setting(window, min_trades=min_trades, min_train_trades=min_train_trades)
         if not param:
             years.append({"year": y, "param": None})
@@ -520,11 +604,10 @@ def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_
     p_all, f_all = cat(plain), cat(filtered)
     trained, with_patterns = _trade_stats(p_all["net_return"]), _trade_stats(f_all["net_return"])
     positive_years = sum(1 for y in years if (y.get("with_patterns") or {}).get("avg", 0) > 0)
-    latest = int(t["year"].max())
-    recent = t[t["year"] > latest - lookback_years]
+    recent = _recent(t, lookback_years)
     param_now, eligible_now, _ = _choose_setting(recent, min_trades=min_trades, min_train_trades=min_train_trades)
     blocked_now = learn_blocked(recent[(recent["param"] == param_now) & recent["symbol"].isin(eligible_now)]) if param_now else {}
-    base = t[(t["year"] >= int(t["year"].min()) + lookback_years) & (t["param"] == default_param)]
+    base = t[(t["year"] >= _first_test_year(t, lookback_years)) & (t["param"] == default_param)]
     by_condition = {f: {str(k): _trade_stats(g["net_return"]) for k, g in base.groupby(f)} for f in PATTERN_FEATURES if f in base}
     enforce = bool(with_patterns.get("trades", 0) >= 30 and (with_patterns.get("avg") or 0) > 0
                    and (with_patterns.get("avg") or 0) >= (trained.get("avg") or 0) and positive_years * 2 >= len(years))
@@ -533,7 +616,7 @@ def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_
             "default_every_symbol": _trade_stats(base["net_return"]), "positive_years": positive_years,
             "test_years": len(years), "by_condition": by_condition, "param_now": {"STOP_BUFFER_ATR15": stop_buffer, "MIN_RR": min_rr},
             "eligible_now": sorted(eligible_now), "blocked_now": blocked_now, "enforce": enforce,
-            "rule": (f"setting, symbols and losing entry conditions learned on the prior {lookback_years} year(s); "
+            "rule": (f"setting, symbols and losing entry conditions learned on {_lookback_words(lookback_years)}; "
                      f"a condition is skipped when >= {PATTERN_MIN_TRADES} trades lost with t <= {PATTERN_MAX_T}")}
 
 
@@ -556,8 +639,8 @@ def walk_forward_eligibility(trades: pd.DataFrame, *, min_trades: int = ELIGIBIL
     t = trades.copy()
     t["year"] = pd.to_datetime(t["entry_ts"], unit="s", utc=True).dt.year
     years, picked_frames = [], []
-    for y in range(int(t["year"].min()) + lookback_years, int(t["year"].max()) + 1):
-        train = t[(t["year"] >= y - lookback_years) & (t["year"] < y)]
+    for y in range(_first_test_year(t, lookback_years), int(t["year"].max()) + 1):
+        train = _train_window(t, y, lookback_years)
         per = train.groupby("symbol")["net_return"].agg(["size", "mean"])
         eligible = set(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
         test = t[t["year"] == y]
@@ -566,19 +649,19 @@ def walk_forward_eligibility(trades: pd.DataFrame, *, min_trades: int = ELIGIBIL
         years.append({"year": y, "eligible": len(eligible), "picked": _trade_stats(picked["net_return"]),
                       "all": _trade_stats(test["net_return"])})
     picked_all = pd.concat(picked_frames, ignore_index=True) if picked_frames else pd.DataFrame(columns=["net_return"])
-    first_test = int(t["year"].min()) + lookback_years
+    first_test = _first_test_year(t, lookback_years)
     every = t[t["year"] >= first_test]
     oos, base = _trade_stats(picked_all["net_return"]), _trade_stats(every["net_return"])
     positive_years = sum(1 for y in years if (y["picked"].get("avg") or 0) > 0)
     latest_year = int(t["year"].max())
-    recent = t[t["year"] > latest_year - lookback_years]
+    recent = _recent(t, lookback_years)
     per = recent.groupby("symbol")["net_return"].agg(["size", "mean"])
     current = sorted(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
     enforce = bool(oos.get("trades", 0) >= 30 and (oos.get("avg") or 0) > 0 and (oos.get("avg") or 0) > (base.get("avg") or 0)
                    and positive_years * 2 >= len(years))
     return {"years": years, "out_of_sample": oos, "every_symbol": base, "positive_years": positive_years,
             "test_years": len(years), "eligible_now": current, "enforce": enforce,
-            "rule": f">= {min_trades} trades and average net > 0 over the prior {lookback_years} years"}
+            "rule": f">= {min_trades} trades and average net > 0 over {_lookback_words(lookback_years)}"}
 
 
 def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades: int = ELIGIBILITY_MIN_TRADES,
@@ -601,25 +684,25 @@ def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades
         return best
 
     years, oos = [], []
-    for y in range(int(t["year"].min()) + lookback_years, int(t["year"].max()) + 1):
-        param, eligible, _ = choose(t[(t["year"] >= y - lookback_years) & (t["year"] < y)])
+    for y in range(_first_test_year(t, lookback_years), int(t["year"].max()) + 1):
+        param, eligible, _ = choose(_train_window(t, y, lookback_years))
         test = t[(t["year"] == y) & (t["param"] == param) & (t["symbol"].isin(eligible))] if param else t.iloc[0:0]
         oos.append(test)
         years.append({"year": y, "param": param, "eligible": len(eligible), "result": _trade_stats(test["net_return"])})
     oos_all = pd.concat(oos, ignore_index=True) if oos else pd.DataFrame(columns=["net_return"])
-    first = int(t["year"].min()) + lookback_years
+    first = _first_test_year(t, lookback_years)
     baseline = t[(t["year"] >= first) & (t["param"] == default_param)]
     trained, base = _trade_stats(oos_all["net_return"]), _trade_stats(baseline["net_return"])
     positive_years = sum(1 for y in years if (y["result"].get("avg") or 0) > 0)
     latest = int(t["year"].max())
-    param_now, eligible_now, _ = choose(t[t["year"] > latest - lookback_years])
+    param_now, eligible_now, _ = choose(_recent(t, lookback_years))
     enforce = bool(trained.get("trades", 0) >= 30 and (trained.get("avg") or 0) > 0
                    and (trained.get("avg") or 0) > (base.get("avg") or 0) and positive_years * 2 >= len(years))
     stop_buffer, min_rr = (float(x) for x in param_now.split(":")) if param_now else (None, None)
     return {"years": years, "out_of_sample": trained, "default_every_symbol": base, "positive_years": positive_years,
             "test_years": len(years), "param_now": {"STOP_BUFFER_ATR15": stop_buffer, "MIN_RR": min_rr},
             "eligible_now": sorted(eligible_now), "enforce": enforce,
-            "rule": f"setting and symbols chosen on the prior {lookback_years} years: >= {min_trades} trades, average net > 0"}
+            "rule": f"setting and symbols chosen on {_lookback_words(lookback_years)}: >= {min_trades} trades, average net > 0"}
 
 
 def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
@@ -679,6 +762,9 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
             result["trained"] = walk_forward_trained(trades, default_param=default_param, lookback_years=lookback)
         if all(f in trades for f in PATTERN_FEATURES):
             result["patterns"] = walk_forward_patterns(trades, default_param=default_param, lookback_years=lookback)
+        if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
+            th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
+            result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
     if not trades.empty:
@@ -700,7 +786,8 @@ def _eligibility_from(result: dict[str, Any]) -> dict[str, Any]:
                    (wf.get("out_of_sample", {}).get("avg") or 0))
     if pt.get("enforce") and (pt.get("with_patterns", {}).get("avg") or 0) > best_avg:
         return {"enforce": True, "symbols": pt.get("eligible_now", []), "rule": pt.get("rule"), "params": pt.get("param_now"),
-                "blocked": pt.get("blocked_now") or {}, "source": "patterns", "computed_at": result.get("computed_at"),
+                "blocked": pt.get("blocked_now") or {}, "vol_thresholds": result.get("vol_thresholds") or {},
+                "source": "patterns", "computed_at": result.get("computed_at"),
                 "out_of_sample": pt.get("with_patterns"), "grid": result.get("grid"), "version": result.get("version", 1)}
     src = tr if use_trained else wf
     return {"enforce": bool(src.get("enforce")), "symbols": src.get("eligible_now", []), "rule": src.get("rule"),
@@ -729,7 +816,9 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 
 # Bumped when a bot's study replay changes in a way that changes results;
 # a published study of an older version is re-run on the next start check.
-STUDY_VERSION = {"kalshi15m": 2}  # 2: settles on Kalshi's reference (minute mean for crypto)
+# perps 2 / kalshi15m 3: every prior year (expanding), side and volatility
+# regime learned too; kalshi15m 2: settles on Kalshi's reference.
+STUDY_VERSION = {"perps": 2, "kalshi15m": 3}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
