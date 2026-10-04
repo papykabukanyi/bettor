@@ -201,3 +201,15 @@ def test_a_just_published_study_is_not_launched_again(monkeypatch):
     assert job.maybe_start_multiyear("perps")["action"] == "already_published" and launched == []
     assert job.eligibility("perps") is not None  # the newer result file refreshes the cache too
     job._eligibility_cache.pop("perps", None)  # noqa: SLF001
+
+
+def test_a_published_study_survives_a_restart_on_the_dashboard(monkeypatch, tmp_path):
+    import huggingface_hub
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"computed_at": "2026-10-04T00:48:28", "grid": ["1.5:3.0"], "walk_forward": {}, "trained": {},
+                                  "patterns": {"enforce": False, "with_patterns": {"trades": 114}}}))
+    monkeypatch.setenv("HF_API_KEY", "token")
+    monkeypatch.setattr(job, "_report_checked", {})
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, path, **kw: str(report))
+    status = job.multiyear_status("perps")
+    assert status["latest"]["computed_at"] == "2026-10-04T00:48:28" and status["latest"]["patterns"]["with_patterns"]["trades"] == 114

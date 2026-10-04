@@ -813,8 +813,35 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     return launch(f"{bot}_multiyear")
 
 
+_report_checked: dict[str, float] = {}
+
+
+def _restore_published_report(bot: str) -> None:
+    """After a restart the local result file is gone: bring back the
+    published report from the bot's HF model repo (checked at most every
+    10 minutes when there is none yet)."""
+    local = LOCAL_DIR / f"{bot}_multiyear.json"
+    token = os.getenv("HF_API_KEY", "")
+    if local.exists() or not token or time.time() - _report_checked.get(bot, 0.0) < 600:
+        return
+    _report_checked[bot] = time.time()
+    try:
+        from huggingface_hub import hf_hub_download
+
+        from server_common import call_with_hard_timeout
+        path = call_with_hard_timeout(lambda: hf_hub_download(REPOS[bot], "setup_strategy/multiyear/report.json",
+                                                              repo_type="model", token=token), timeout_sec=20)
+        if path:
+            LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+            local.write_text(Path(path).read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def multiyear_status(bot: str) -> dict[str, Any]:
-    """Progress of a running study and the latest finished one."""
+    """Progress of a running study and the latest finished one (restored
+    from HF after a restart)."""
+    _restore_published_report(bot)
     out: dict[str, Any] = {"bot": bot}
     for key, name in (("progress", f"{bot}_multiyear_progress.json"), ("latest", f"{bot}_multiyear.json")):
         try:
