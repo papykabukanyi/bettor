@@ -874,6 +874,13 @@ def live_setup(ticker: str, *, sides: tuple[str, ...], fee_rate_roundtrip: float
     return result
 
 
+def _us_session_open(ts: float) -> bool:
+    """Regular US equity hours (09:30-16:00 ET, weekdays; holidays not known)."""
+    import datetime as dt
+    t = dt.datetime.fromtimestamp(ts, _ET)
+    return t.weekday() < 5 and (9 * 60 + 30) <= t.hour * 60 + t.minute < 16 * 60
+
+
 def setup_from_candles(one_min: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: float,
                        news_score: float | None, spread_bps: float | None = None, now: float | None = None,
                        leader_candles: pd.DataFrame | None = None, leader_symbol: str | None = None,
@@ -885,7 +892,10 @@ def setup_from_candles(one_min: pd.DataFrame, *, sides: tuple[str, ...], fee_rat
         return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": "no chart candles for this coin"}}}
     last_ts = int(one_min["ts"].max())
     if now - last_ts > STALE_AFTER_SEC:
-        return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"last candle {int(now - last_ts)}s old"}}}
+        detail = f"last candle {int(now - last_ts)}s old"
+        if session == "us_equity" and not _us_session_open(now):
+            detail = "US market closed (ETF chart)"
+        return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": detail}}}
     if spread_bps is None:
         spread_bps = 0.0
         last = one_min.sort_values("ts").iloc[-1]

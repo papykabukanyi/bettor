@@ -151,3 +151,13 @@ def test_a_kraken_chart_plan_is_carried_to_the_alpaca_exchange_price():
     plan = alpaca_crypto_setup.plan_at_price({"plan": {"stop": 99.0, "target": 106.0}}, price=100.5, fee_rate_roundtrip=0.0,
                                              spread_bps=0.0, chart_price=100.0, min_rr=1.0)
     assert plan["stop"] == pytest.approx(99.495) and plan["target"] == pytest.approx(106.53)
+
+
+def test_a_commodity_perp_off_hours_says_the_market_is_closed():
+    from data import perps_setup
+    saturday = int(pd.Timestamp("2026-10-03T18:00:00Z").timestamp())
+    stale = pd.DataFrame({"ts": [saturday - 86400], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1.0]})
+    r = perps_setup.setup_from_candles(stale, sides=("long",), fee_rate_roundtrip=0.0, news_score=None, now=saturday, session="us_equity")
+    assert r["checks"]["data"]["detail"] == "US market closed (ETF chart)"
+    r = perps_setup.setup_from_candles(stale, sides=("long",), fee_rate_roundtrip=0.0, news_score=None, now=saturday)
+    assert r["checks"]["data"]["detail"].startswith("last candle")

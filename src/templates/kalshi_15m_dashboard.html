@@ -95,6 +95,14 @@
   #setup-section td.setup-why { white-space: normal; min-width: 200px; max-width: 320px; }
   .setup-na { color: var(--muted); }
   .setup-note { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
+
+  .status-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 999px; font-size: 12px; white-space: nowrap; }
+  .chip b { color: var(--muted); font-weight: 600; }
+  .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+  .chip.ok i { background: var(--green); } .chip.bad i { background: var(--red); } .chip.warn i { background: var(--yellow); }
+  .legend { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
+  .replay-detail summary { color: var(--muted); font-size: 12px; cursor: pointer; margin: 0 0 6px; }
 </style>
 </head>
 <body>
@@ -116,27 +124,25 @@
   <div class="card"><h2>Win Rate</h2><div id="win-rate" class="stat">--</div><div class="sub" id="win-rate-sub">--</div></div>
   <div class="card ev-only"><h2>Crypto Edge Model</h2><div id="crypto-model" class="stat small">--</div><div class="sub" id="crypto-model-sub">--</div></div>
   <div class="card ev-only"><h2>Metals Edge Model</h2><div id="metals-model" class="stat small">--</div><div class="sub" id="metals-model-sub">--</div></div>
-  <div class="card"><h2>Shard 2 Collateral</h2><div id="shard2-balance" class="stat">--</div><div class="sub" id="shard2-sub">Crypto &amp; Commodities</div></div>
+  <div class="card"><h2>Balance</h2><div id="shard2-balance" class="stat">--</div><div class="sub" id="shard2-sub">Kalshi crypto &amp; commodities</div></div>
 </div>
 
 <section id="setup-evidence-section">
-  <h3>Strategy Evidence &mdash; this bot's rules re-tested daily on real data (on the HF Space)</h3>
-  <p class="setup-note" id="setup-evidence-note">Waiting for the first daily replay&hellip;</p>
-  <p class="setup-note" id="setup-gate-note"></p>
-  <p class="setup-note" id="market-data-note"></p>
-  <p class="setup-note" id="study-note"></p>
-  <p class="setup-note" id="funding-note"></p>
+  <h3>Status</h3>
+  <div class="status-strip" id="status-strip"><span class="chip"><i></i>loading</span></div>
+  <details class="replay-detail"><summary>Replay detail &middot; last 30 days</summary>
   <div class="scroll-x">
     <table>
       <thead><tr><th>Version</th><th>Trades</th><th>Win rate</th><th>Avg per trade</th><th>Total</th><th>Profit factor</th><th>t-stat</th><th>First half avg</th><th>Second half avg</th></tr></thead>
       <tbody id="setup-evidence-body"><tr><td colspan="9" class="empty">Waiting for the first daily replay&hellip;</td></tr></tbody>
     </table>
   </div>
+  </details>
 </section>
 
 <section id="setup-section">
-  <h3>Setup Checklist &mdash; the trading method on each underlying's chart</h3>
-  <p class="setup-note">Every market from the last cycle against each rule, in order. A long setup buys YES, a short setup buys NO, only when the contract's own reward/risk at Kalshi's real ask after fees clears the bar; R:R here is the contract's. Sold when the underlying reaches the stop or target, otherwise settled. &#10003; passed &middot; &#10007; failed &middot; &middot; not reached (an earlier rule failed). A trade needs every rule and reward/risk of at least <span id="setup-min-rr">--</span> after costs. Hover a cell for the reading.</p>
+  <h3>Setup checklist</h3>
+  <p class="legend">long → YES · short → NO · R:R is the contract's at Kalshi's ask after fees · &#10003; pass &middot; &#10007; fail &middot; &middot; not reached &middot; need R:R &ge; <span id="setup-min-rr">--</span></p>
   <div class="scroll-x">
     <table>
       <thead><tr><th>Market</th><th>Side</th><th title="15m higher highs and higher lows (lower highs and lower lows for a short)">Trend</th><th title="5m close through a support/resistance zone">Break</th><th title="Breakout candle volume vs its 20-candle average">Volume</th><th title="Price came back to the level">Retest</th><th title="The retest held the level with a reaction candle">Hold</th><th title="Price on the right side of a rising/falling session VWAP">VWAP</th><th title="RSI and MACD confirm, or a supporting divergence">RSI/MACD</th><th title="No divergence against the trade">Diverg.</th><th title="No news against the trade">News</th><th title="Planned reward vs risk after costs">R/R ok</th><th title="Market leader not moving against the trade (when correlated)">Leader</th><th title="Not already on the same bet across all bots">Exposure</th><th title="Planned stop and target on the underlying's chart">Stop / target</th><th>R:R</th><th>Decision</th><th>Why</th></tr></thead>
@@ -226,13 +232,13 @@
     <div><span class="k">Kalshi quote history (last collect)</span><span class="v" id="feed-quotes">--</span></div>
     <div><span class="k">Alpaca spot (last collect)</span><span class="v" id="feed-spot">--</span></div>
     <div><span class="k">Spot vs Kalshi settlements</span><span class="v" id="feed-validation">--</span></div>
-    <div><span class="k">Edge model built</span><span class="v" id="feed-model">--</span></div>
+    <div class="ev-only"><span class="k">Edge model built</span><span class="v" id="feed-model">--</span></div>
     <div><span class="k">Last scan</span><span class="v" id="feed-scan">--</span></div>
   </div>
 </section>
 
 <section>
-  <h3>Strategy &amp; Server Config</h3>
+  <h3>Config</h3>
   <div class="config-grid">
     <div><span class="k">Live trading</span><span class="v" id="cfg-live">--</span></div>
     <div><span class="k">Entry mode</span><span class="v" id="cfg-mode">--</span></div>
@@ -366,9 +372,16 @@ function renderBanner(data) {
     const checks = ((data.last_scan || {}).checks) || [];
     const entered = checks.filter(c => c.action === "entered").map(c => c.coin);
     el.className = entered.length ? "banner go" : "banner wait";
+    // Facts from the last scan: markets open, where each stopped, how long ago.
+    const open = checks.filter(c => !["no_open_window", "coin_outside_active_entry_universe"].includes(c.reason));
+    const stopAt = {};
+    open.forEach(c => { const r = c.setup_reason || c.reason; if (r) stopAt[r] = (stopAt[r] || 0) + 1; });
+    const stops = Object.entries(stopAt).sort((a, b) => b[1] - a[1]).map(([r, n]) => `${n} ${esc(String(r).replace(/_/g, " "))}`).join(" · ");
+    const at = (data.last_scan || {}).at;
+    const ago = at ? Math.max(0, Math.round((Date.now() - new Date(at).getTime()) / 1000)) + "s ago" : "--";
     el.innerHTML = entered.length
-      ? `<strong>Entered: ${esc(entered.join(", "))}</strong><div class="sub">On a confirmed price-action setup; sold at the planned stop or target, otherwise settled.</div>`
-      : `<strong>Setup mode: waiting for a confirmed setup</strong><div class="sub">Every market is checked each cycle against trend, level break, volume, retest, VWAP, RSI/MACD and news; a contract is bought only when its own reward/risk after fees is at least ${esc((data.params || {}).setup_min_rr ?? "--")}.</div>`;
+      ? `<strong>Entered: ${esc(entered.join(", "))}</strong><div class="sub">last scan ${ago}</div>`
+      : `<strong>Waiting for a setup &middot; ${open.length} markets open</strong><div class="sub">${stops || "no open markets"} &middot; last scan ${ago}</div>`;
     return;
   }
   if (data.entry_mode === "legacy") {
@@ -566,10 +579,7 @@ async function refreshStatus() {
     document.getElementById("setup-section").style.display = setupMode ? "" : "none";
     document.getElementById("ev-scan-section").style.display = setupMode ? "none" : "";
     document.querySelectorAll(".ev-only").forEach(el => { el.style.display = setupMode ? "none" : ""; });
-    try { renderSetupGate(data.setup_evidence_gate); } catch (e) { console.error("gate render failed", e); }
-    try { renderAlpacaData(data.market_data); } catch (e) { console.error("market data render failed", e); }
-    try { renderFunding(data.funding); } catch (e) { console.error("funding render failed", e); }
-    loadStudy("kalshi15m");
+    try { renderStatusStrip(data); } catch (e) { console.error("status strip render failed", e); }
     try { renderSetupEvidence(data.setup_backtest); } catch (e) { console.error("setup evidence render failed", e); }
     try { renderSetupChecklist((data.last_scan || {}).checks, p.setup_min_rr); } catch (e) { console.error("setup checklist render failed", e); }
     renderAccuracy("acc-crypto", markets.crypto);
@@ -644,7 +654,7 @@ async function refreshShardBalance() {
     const dollars = parseFloat((data.shard_2_crypto_commodities || {}).balance_dollars);
     balEl.textContent = isNaN(dollars) ? "--" : fmtUsd(dollars);
     balEl.className = "stat " + (dollars > 0 ? "pos" : "neg");
-    subEl.textContent = dollars > 0 ? "Crypto & Commodities" : "$0: real orders can't fill";
+    subEl.textContent = dollars > 0 ? "Kalshi crypto & commodities" : "$0: real orders can't fill";
   } catch (e) { console.error("shard balance refresh failed", e); }
 }
 
@@ -726,64 +736,83 @@ function renderSetupChecklist(rows, minRr) {
   }).join("");
 }
 
-function renderFunding(f) {
-  const el = document.getElementById("funding-note");
-  if (!el || !f) return;
-  if (!f.enabled) { el.innerHTML = "Funding: automatic split off."; return; }
-  const l = f.last || {};
-  const usd = x => x == null ? "--" : "$" + Number(x).toFixed(2);
-  const why = { in_band: "split within the band", perps_has_open_positions: "waiting: perps has an open position",
-    "15m_has_open_positions": "waiting: the 15m bot has an open position", rebalance: "rebalanced", live_trading_off: "live trading off",
-    nothing_to_move: "nothing to move", disabled: "off" }[l.action] || (l.error ? "error: " + l.error : "--");
-  const last = (f.recent_transfers || []).slice(-1)[0];
-  el.innerHTML = `Funding (your 50/50 split of Kalshi cash): perps ${usd(l.perps_usd)} &middot; 15m ${usd(l.fifteen_usd)}`
-    + (l.idle_usd ? ` &middot; idle ${usd(l.idle_usd)}` : "") + ` &middot; 15m target ${usd(l.target_15m_usd)} &mdash; ${setupEsc(why)}`
-    + (last ? `. Last transfer ${usd(last.amount_usd)} (${setupEsc(last.why || "")}) at ${setupEsc(String(last.at || "").slice(11, 16))} UTC.` : ".");
+const STATUS_BOT = "kalshi15m";
+let statusStudy = null, statusStudyAt = 0, statusLast = null;
+function statusChip(label, value, state, title) {
+  return `<span class="chip ${state}"${title ? ` title="${setupEsc(title)}"` : ""}><i></i><b>${label}</b>${setupEsc(value)}</span>`;
 }
-function renderAlpacaData(md) {
-  const el = document.getElementById("market-data-note");
-  if (!el || !md) return;
-  const s = md.streams || {};
-  const one = (name, st) => !st ? `${name} stream off` : st.connected
-    ? `${name} stream live (${st.subscribed} bars${st.subscribed_ticks ? ", " + st.subscribed_ticks + " live ticks" : ""}${st.last_bar_age_sec != null ? ", last bar " + Math.round(st.last_bar_age_sec) + "s ago" : ""})`
-    : `${name} stream reconnecting`;
+function statusPct(x, d = 2) { return x == null ? "--" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(d)}%`; }
+function statusAge(s) { return s == null ? "" : s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
+function refreshStatusStudy() {
+  if (Date.now() - statusStudyAt < 60000) return;
+  statusStudyAt = Date.now();
+  fetch(`/api/setup-study/${STATUS_BOT}`).then(r => r.ok ? r.json() : null).then(j => {
+    statusStudy = j;
+    if (statusLast) renderStatusStrip(statusLast, true);
+  }).catch(() => {});
+}
+function renderStatusStrip(data, fromStudy) {
+  const el = document.getElementById("status-strip");
+  if (!el || !data) return;
+  statusLast = data;
+  const out = [];
+  const bt = data.setup_backtest;
+  const s = bt && bt.ok ? bt.with_correlation : null;
+  if (!bt) out.push(statusChip("Replay", "pending", "idle"));
+  else if (!bt.ok) out.push(statusChip("Replay", "failed", "bad", bt.error));
+  else if (!s || !s.trades) out.push(statusChip("Replay", `0 trades · ${bt.days}d`, "idle", bt.computed_at));
+  else {
+    const avg = s.unit === "usd_per_contract" ? `${(s.avg * 100).toFixed(1)}¢` : statusPct(s.avg);
+    out.push(statusChip("Replay", `${s.trades} tr · ${avg}/tr · PF ${s.profit_factor ?? "--"}`, s.avg > 0 ? "ok" : "bad",
+      `last ${bt.days} days · ${bt.computed_at || ""}`));
+  }
+  const g = data.setup_evidence_gate;
+  const gateWhy = { replay_profitable: "replay up", no_replay_yet: "no replay yet", last_replay_failed: "replay failed",
+    replay_stale: "replay stale", too_few_replay_trades: "too few trades", replay_not_profitable: "replay down" };
+  if (g) out.push(statusChip("Gate", !g.gated ? "off" : `${g.open ? "open" : "closed"} · ${gateWhy[g.reason] || g.reason}`,
+    !g.gated ? "idle" : g.open ? "ok" : "bad"));
+  const md = data.market_data || {};
+  const st = md.streams || {};
+  const parts = []; let bad = false;
+  for (const k of ["crypto", "stocks"]) {
+    const x = st[k];
+    if (!x || typeof x !== "object") continue;
+    if (!x.connected) bad = true;
+    parts.push(`${k} ${x.connected ? (x.last_bar_age_sec != null ? statusAge(x.last_bar_age_sec) : "on") : "down"}`);
+  }
   const n = md.news || {};
-  const news = n.connected ? `news stream live (${n.stored_articles || 0} articles held)` : "news stream connecting";
-  const bad = [s.crypto, s.stocks].some(st => st && !st.connected);
-  el.innerHTML = `Market data: <b>Alpaca only</b> &mdash; crypto on ${setupEsc(md.crypto_venue || "Kraken US via Alpaca")}, commodities on SIP ETFs, news from Benzinga. `
-    + `<span style="color:${bad ? "var(--red)" : "inherit"}">${setupEsc(one("crypto", s.crypto))} &middot; ${setupEsc(one("stocks", s.stocks))} &middot; ${setupEsc(news)}</span>`;
-}
-async function loadStudy(bot) {
-  const el = document.getElementById("study-note");
-  if (!el) return;
-  try {
-    const r = await (await fetch(`/api/setup-study/${bot}`)).json();
-    const pct = x => x == null ? "--" : (x * 100).toFixed(3) + "%";
-    if (r.running && r.progress) {
-      el.innerHTML = `Multi-year study (Alpaca archives, 16 plan settings &times; every coin &times; hour / weekday / news / leader): running, ${r.progress.done}/${r.progress.total} symbols, ${r.progress.trades_so_far} trades so far.`;
-      return;
-    }
-    const p = (r.latest || {}).patterns;
-    if (!p) { el.innerHTML = "Multi-year study (Alpaca archives): waits for the crypto and news archives, then runs on the Space's cores (one study at a time)."; return; }
-    const blocked = Object.entries(p.blocked_now || {}).map(([f, b]) => `${f}: ${b.join(", ")}`).join("; ") || "none";
-    el.innerHTML = `Multi-year study, scored only on years it never saw: learned setting + coins ${pct((p.trained || {}).avg)} per trade over ${(p.trained || {}).trades || 0} trades; `
-      + `with learned entry conditions ${pct((p.with_patterns || {}).avg)} over ${(p.with_patterns || {}).trades || 0}; every trade at the old setting ${pct((p.default_every_symbol || {}).avg)}. `
-      + `${p.positive_years}/${p.test_years} unseen years positive. Losing conditions now: ${setupEsc(blocked)}. `
-      + `<span class="tag ${p.enforce ? "yes" : "no"}">${p.enforce ? "IN FORCE" : "NOT PROVEN YET"}</span>`;
-  } catch (e) { console.error("study render failed", e); }
-}
-function renderSetupGate(g) {
-  const el = document.getElementById("setup-gate-note");
-  if (!el || !g) return;
-  if (!g.gated) { el.innerHTML = "Entry gate: off for this bot (entries follow the live setup alone)."; return; }
-  const why = { replay_profitable: "the latest replay is profitable after costs", no_replay_yet: "waiting for the first replay",
-    last_replay_failed: "the last replay failed", replay_stale: "the replay is out of date",
-    too_few_replay_trades: `fewer than ${g.min_trades} replay trades`, replay_not_profitable: `the replay is not profitable (needs avg > 0 and t ≥ ${g.min_t})` }[g.reason] || g.reason;
-  el.innerHTML = `Entry gate: <span class="tag ${g.open ? "yes" : "no"}">${g.open ? "OPEN" : "CLOSED"}</span> ${setupEsc(why)}. New positions open only while this bot's own real-data replay is profitable; exits always run.`;
+  if (n.connected !== undefined) { parts.push(`news ${n.connected ? (n.stored_articles ?? 0) : "down"}`); if (!n.connected) bad = true; }
+  const feed = String(md.feed || md.stock_feed || "").toUpperCase();
+  if (parts.length) out.push(statusChip("Alpaca", (feed ? feed + " · " : "") + parts.join(" · "), bad ? "bad" : "ok", md.crypto_venue || ""));
+  const sd = statusStudy;
+  if (sd && sd.ok) {
+    if (sd.running && sd.progress) {
+      out.push(statusChip("Study", `running ${sd.progress.done ?? 0}/${sd.progress.total ?? "?"} · ${sd.progress.trades_so_far ?? 0} tr`, "warn"));
+    } else if (sd.latest) {
+      const L = sd.latest, p = L.patterns, t = L.trained, w = L.walk_forward || {};
+      const res = (p && p.with_patterns) || (t && t.out_of_sample) || w.out_of_sample || {};
+      const yrs = p || t || w;
+      const enforced = !!((p && p.enforce) || (t && t.enforce) || w.enforce);
+      out.push(statusChip("Study", `unseen yrs ${statusPct(res.avg, 3)}/tr · ${res.trades ?? 0} tr · ${yrs.positive_years ?? 0}/${yrs.test_years ?? 0} yrs up · ${enforced ? "in force" : "not used"}`,
+        enforced ? "ok" : res.avg > 0 ? "warn" : "bad", L.computed_at || ""));
+    } else out.push(statusChip("Study", "queued", "idle"));
+  }
+  const f = data.funding;
+  if (f && f.enabled) {
+    const l = f.last || {};
+    const usd = x => x == null ? "--" : "$" + Number(x).toFixed(2);
+    const word = { in_band: "balanced", rebalance: "moved", perps_has_open_positions: "wait: perps open",
+      "15m_has_open_positions": "wait: 15m open", live_trading_off: "off", nothing_to_move: "balanced" }[l.action] || (l.error ? "error" : "--");
+    const last = (f.recent_transfers || []).slice(-1)[0];
+    out.push(statusChip("50/50 split", word + (last ? ` · last ${usd(last.amount_usd)} ${String(last.at || "").slice(11, 16)} UTC` : ""),
+      l.ok === false ? "bad" : String(l.action || "").includes("open_positions") ? "warn" : "ok",
+      `perps ${usd(l.perps_usd)} · 15m ${usd(l.fifteen_usd)}${l.idle_usd ? " · idle " + usd(l.idle_usd) : ""}`));
+  }
+  el.innerHTML = out.join("");
+  if (!fromStudy) refreshStatusStudy();
 }
 function renderSetupEvidence(bt) {
   const body = document.getElementById("setup-evidence-body");
-  const note = document.getElementById("setup-evidence-note");
   if (!body) return;
   if (!bt) { body.innerHTML = '<tr><td colspan="9" class="empty">Waiting for the first daily replay&hellip;</td></tr>'; return; }
   if (!bt.ok) { body.innerHTML = `<tr><td colspan="9" class="empty">Last replay failed: ${setupEsc(bt.error || "unknown error")}</td></tr>`; return; }
@@ -796,8 +825,6 @@ function renderSetupEvidence(bt) {
       <td>${s.profit_factor ?? "--"}</td><td>${s.t_stat ?? "--"}</td>
       <td>${fmt((s.first_half || {}).avg)}</td><td>${fmt((s.second_half || {}).avg)}</td></tr>`;
   body.innerHTML = row("<strong>Live system</strong> (with correlation rule)", bt.with_correlation) + row("Without correlation rule", bt.without_correlation);
-  if (note) note.textContent = `Last ${bt.days} days, ${(bt.universe || []).length} symbols, replayed ${bt.computed_at ? new Date(bt.computed_at).toLocaleString() : "--"}`
-    + (bt.published ? ` · published to ${bt.hf_repo}` : "") + ". Costs included; past results are evidence, not a promise.";
 }
 </script>
 </body>
