@@ -4302,3 +4302,49 @@ def test_a_learned_volatility_condition_is_read_from_the_live_chart(monkeypatch,
     monkeypatch.setattr(strat.perps_setup, "chart_candles", lambda ticker: "live chart")
     c = strat.evaluate_candidate("KXBTCPERP")
     assert c["should_enter"] is False and "vol_regime=high" in c["reason"] and c["entry_conditions"]["vol_regime"] == "high"
+
+
+# ---- exit rules the study chooses (time exit, break-even stop) ----
+
+def test_the_study_chosen_exit_rule_is_applied_and_reverted(monkeypatch, setup_mode):
+    """While the study's choice is in force the bot trades its stop, reward,
+    hold limit and break-even trigger; once it isn't, the defaults return
+    (never a stale earlier choice)."""
+    from data import perps_setup, setup_backtest_job
+    for key, value in strat._PLAN_DEFAULTS.items():  # noqa: SLF001
+        monkeypatch.setattr(perps_setup, key, value)
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {
+        "enforce": True, "symbols": ["BTC"], "rule": "r",
+        "params": {"STOP_BUFFER_ATR15": 3.0, "MIN_RR": 2.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 1.0}})
+    strat.evaluate_candidate("KXBTCPERP")
+    assert (perps_setup.STOP_BUFFER_ATR15, perps_setup.MIN_RR, perps_setup.MAX_HOLD_HOURS, perps_setup.BREAKEVEN_R) == (3.0, 2.0, 8.0, 1.0)
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": False, "symbols": [], "rule": "r",
+                                                                         "params": {"MAX_HOLD_HOURS": 4.0}})
+    strat.evaluate_candidate("KXBTCPERP")
+    assert perps_setup.MAX_HOLD_HOURS == strat._PLAN_DEFAULTS["MAX_HOLD_HOURS"] and perps_setup.BREAKEVEN_R == 0.0  # noqa: SLF001
+
+
+def test_break_even_moves_the_stop_to_entry_on_kalshi_too(monkeypatch):
+    """Once the trade is 1x its risk in profit its stop becomes the entry
+    price -- in the bot's own check and in the bracket on Kalshi."""
+    from data import perps_setup
+    calls = []
+    monkeypatch.setattr(strat, "cancel_cross_exit_triggers", lambda ticker: calls.append(("cancel", ticker)))
+    monkeypatch.setattr(strat, "set_cross_exit_bracket",
+                        lambda ticker, **kw: calls.append(("set", kw)) or {"id": "b2", "status": "active"})
+    p = _bracket_position(entry_price=100.0, setup_stop_price=99.0, setup_target_price=110.0, setup_breakeven_r=1.0)
+    assert perps_setup.plan_update(p, 100.6) is False and p["setup_stop_price"] == 99.0
+    assert perps_setup.plan_update(p, 101.0) is True and p["setup_stop_price"] == 100.0 and p["setup_initial_stop_price"] == 99.0
+    assert perps_setup.plan_update(p, 102.0) is False  # once
+    strat._attach_exchange_bracket(p, 0.01)  # noqa: SLF001
+    assert calls[-1] == ("set", {"stop_loss_price": 100.0, "take_profit_price": 110.0})
+    assert perps_setup.plan_exit(p, 99.95) == (True, "breakeven_stop (entry 100)")
+
+
+def test_a_chosen_hold_limit_closes_the_trade_on_time():
+    from data import perps_setup
+    p = _bracket_position(entry_price=100.0, setup_stop_price=99.0, setup_target_price=110.0, setup_max_hold_minutes=240.0)
+    assert perps_setup.plan_exit(p, 100.5, held_minutes=239)[0] is False
+    assert perps_setup.plan_exit(p, 100.5, held_minutes=241) == (True, "time_exit (241 min)")
+    legacy = _bracket_position(entry_price=100.0, setup_stop_price=99.0, setup_target_price=110.0)
+    assert perps_setup.plan_exit(legacy, 100.5, held_minutes=1441)[1].startswith("max_hold_safety")

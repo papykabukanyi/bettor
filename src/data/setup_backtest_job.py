@@ -337,6 +337,48 @@ MULTIYEAR.update({
 KALSHI_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
     "SETUP_MULTIYEAR_KALSHI_PARAM_GRID",
     ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
+# Perps also searches wider stops (the full-history replay: 70% of trades
+# were stopped out within hours at ~1% while trades still open after a day
+# averaged +1%) and, on each, the exit rules below -- (hold limit in hours,
+# break-even trigger in R; 24 h = the safety backstop, 0 = no break-even).
+PERPS_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
+    "SETUP_MULTIYEAR_PERPS_PARAM_GRID",
+    ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
+PERPS_EXITS = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
+    "SETUP_MULTIYEAR_PERPS_EXITS", "24:0,8:0,4:0,24:1,8:1,4:1").split(",") if ":" in item]
+PARAM_KEYS = ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")
+
+
+def _param_label(*values: float) -> str:
+    return ":".join(str(float(v)) for v in values)
+
+
+def _param_values(param: str | None) -> dict[str, float | None]:
+    """A study setting's label as the bot's parameters ("1.5:3.0" ->
+    stop buffer and minimum reward/risk; perps adds hold hours and the
+    break-even trigger)."""
+    if not param:
+        return {"STOP_BUFFER_ATR15": None, "MIN_RR": None}
+    return dict(zip(PARAM_KEYS, (float(x) for x in str(param).split(":"))))
+
+
+def grid_labels(bot: str) -> list[str]:
+    """Every setting a bot's study scores, as the labels its trades carry."""
+    grid = study_grid(bot)
+    if bot == "perps":
+        return [_param_label(sb, rr, hold, be) for sb, rr in grid for hold, be in PERPS_EXITS]
+    return [f"{a}:{b}" for a, b in grid]
+
+
+def default_param(bot: str) -> str:
+    """The bot's current (untrained) setting, as a study label."""
+    import importlib
+    m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+    if bot == "perps":
+        return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.MAX_HOLD_HOURS, m.BREAKEVEN_R)
+    return f"{m.STOP_BUFFER_ATR15}:{m.MIN_RR}"
+
+
 PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader", "side", "vol_regime", "us_market")
 VOL_WINDOW_BARS = {"utc_day": 1440, "us_equity": 390}  # one day of 1-minute bars
 VOL_LOOKBACK_DAYS = 90
@@ -528,7 +570,8 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
         if bot == "perps":
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
                          spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
-                         session=session, leader_session=lead_session)
+                         session=session, leader_session=lead_session,
+                         exits=[(hold * 60.0, be) for hold, be in PERPS_EXITS])
         elif bot == "crypto":
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
                          spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym)
@@ -538,8 +581,10 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
                                  minute_average=m.settles_on_minute_average(sym))
         if not t.empty:
             regimes, now = vol_regimes(None, t["entry_ts"].to_numpy("int64"), session, prep=vprep)
+            label = ([_param_label(setting[0], setting[1], hold, be) for hold, be in zip(t["hold_h"], t["be_r"])]
+                     if "hold_h" in t else f"{setting[0]}:{setting[1]}")
             frames.append(_annotate(t, sym, news_idx, regimes, us_market_states(spy, t["entry_ts"].to_numpy("int64"))).assign(
-                symbol=sym, param=f"{setting[0]}:{setting[1]}", vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
+                symbol=sym, param=label, vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
     cache.__exit__()
     m.STOP_BUFFER_ATR15, m.MIN_RR = default
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -683,10 +728,9 @@ def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_
     by_condition = {f: {str(k): _trade_stats(g["net_return"]) for k, g in base.groupby(f)} for f in PATTERN_FEATURES if f in base}
     enforce = bool(with_patterns.get("trades", 0) >= 30 and (with_patterns.get("avg") or 0) > 0
                    and (with_patterns.get("avg") or 0) >= (trained.get("avg") or 0) and positive_years * 2 >= len(years))
-    stop_buffer, min_rr = (float(x) for x in param_now.split(":")) if param_now else (None, None)
     return {"years": years, "trained": trained, "with_patterns": with_patterns,
             "default_every_symbol": _trade_stats(base["net_return"]), "positive_years": positive_years,
-            "test_years": len(years), "by_condition": by_condition, "param_now": {"STOP_BUFFER_ATR15": stop_buffer, "MIN_RR": min_rr},
+            "test_years": len(years), "by_condition": by_condition, "param_now": _param_values(param_now),
             "eligible_now": sorted(eligible_now), "blocked_now": blocked_now, "enforce": enforce,
             "rule": (f"setting, symbols and losing entry conditions learned on {_lookback_words(lookback_years)}; "
                      f"a condition is skipped when >= {PATTERN_MIN_TRADES} trades lost with t <= {PATTERN_MAX_T}")}
@@ -770,9 +814,8 @@ def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades
     param_now, eligible_now, _ = choose(_recent(t, lookback_years))
     enforce = bool(trained.get("trades", 0) >= 30 and (trained.get("avg") or 0) > 0
                    and (trained.get("avg") or 0) > (base.get("avg") or 0) and positive_years * 2 >= len(years))
-    stop_buffer, min_rr = (float(x) for x in param_now.split(":")) if param_now else (None, None)
     return {"years": years, "out_of_sample": trained, "default_every_symbol": base, "positive_years": positive_years,
-            "test_years": len(years), "param_now": {"STOP_BUFFER_ATR15": stop_buffer, "MIN_RR": min_rr},
+            "test_years": len(years), "param_now": _param_values(param_now),
             "eligible_now": sorted(eligible_now), "enforce": enforce,
             "rule": f"setting and symbols chosen on {_lookback_words(lookback_years)}: >= {min_trades} trades, average net > 0"}
 
@@ -910,7 +953,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
     version = STUDY_VERSION.get(bot, 1)
-    parts = _load_parts(bot, {"version": version, "grid": [f"{a}:{b}" for a, b in grid]})
+    parts = _load_parts(bot, {"version": version, "grid": grid_labels(bot)})
     parts = {s: t for s, t in parts.items() if s in symbols}
     progress: dict[str, Any] = {"bot": bot, "done": len(parts), "total": len(symbols), "workers": MULTIYEAR_WORKERS,
                                 "started_at": dt.datetime.fromtimestamp(started, dt.timezone.utc).isoformat(),
@@ -992,31 +1035,28 @@ def _stop_pool(pool) -> None:
 def _analyse_multiyear(bot: str, trades: pd.DataFrame, *, symbols: list[str], grid: list, started: float,
                        mark=lambda **kw: None) -> dict[str, Any]:
     """Every replayed trade -> the walk-forward record the bot learns from."""
-    import importlib
-
     trades = _one_column_each(trades)
 
     cfg = MULTIYEAR[bot]
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
-                              "grid": [f"{a}:{b}" for a, b in grid], "universe": symbols, "version": STUDY_VERSION.get(bot, 1),
+                              "grid": grid_labels(bot), "universe": symbols, "version": STUDY_VERSION.get(bot, 1),
                               "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
     if trades.empty:
         return result
-    mod = importlib.import_module(f"data.{cfg['module']}")
-    default_param = f"{mod.STOP_BUFFER_ATR15}:{mod.MIN_RR}"
-    base = trades[trades["param"] == default_param] if "param" in trades and default_param in set(trades["param"]) else trades
+    default = default_param(bot)
+    base = trades[trades["param"] == default] if "param" in trades and default in set(trades["param"]) else trades
     lookback = int(cfg.get("lookback", ELIGIBILITY_LOOKBACK_YEARS))
-    result["default_param"] = default_param
+    result["default_param"] = default
     result["lookback_years"] = lookback
     result["all_trades"] = summarize(base, "net_return")
     mark(stage="analysing: walk-forward")
     result["walk_forward"] = walk_forward_eligibility(base, lookback_years=lookback)
     if "param" in trades and trades["param"].nunique() > 1:
         mark(stage="analysing: trained settings")
-        result["trained"] = walk_forward_trained(trades, default_param=default_param, lookback_years=lookback)
+        result["trained"] = walk_forward_trained(trades, default_param=default, lookback_years=lookback)
     if {"hour_block", "weekday"} <= set(trades.columns):
         mark(stage="analysing: entry conditions")
-        result["patterns"] = walk_forward_patterns(trades, default_param=default_param, lookback_years=lookback)
+        result["patterns"] = walk_forward_patterns(trades, default_param=default, lookback_years=lookback)
     if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
         th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
         result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
@@ -1074,7 +1114,7 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 # a published study of an older version is re-run on the next start check.
 # perps 2 / kalshi15m 3: every prior year (expanding), side and volatility
 # regime learned too; kalshi15m 2: settles on Kalshi's reference.
-STUDY_VERSION = {"perps": 2, "kalshi15m": 3}
+STUDY_VERSION = {"perps": 3, "kalshi15m": 3}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
@@ -1085,7 +1125,8 @@ def study_grid(bot: str) -> list[tuple[float, float]]:
         return list(PARAM_GRID)
     import importlib
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
-    return sorted(set(KALSHI_PARAM_GRID) | {(float(m.STOP_BUFFER_ATR15), float(m.MIN_RR))})
+    base = PERPS_PARAM_GRID if bot == "perps" else KALSHI_PARAM_GRID
+    return sorted(set(base) | {(float(m.STOP_BUFFER_ATR15), float(m.MIN_RR))})
 
 
 def _study_symbols(bot: str) -> list[str]:
@@ -1246,7 +1287,7 @@ def _needs_study(bot: str) -> str:
     if err.exists() and time.time() - err.stat().st_mtime < FAILED_RETRY_HOURS * 3600:
         return "failed_recently"
     if not (LOCAL_DIR / f"{bot}_multiyear.queued").exists():
-        wanted = [f"{a}:{b}" for a, b in study_grid(bot)]
+        wanted = grid_labels(bot)
         version = STUDY_VERSION.get(bot, 1)
         try:
             # The study's own result file first: it runs in a separate process,

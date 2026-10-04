@@ -1296,10 +1296,12 @@ def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] =
     coin = kalshi_15m_spot.chart_coin(coin_for_ticker(ticker))
     elig = setup_backtest_job.eligibility("perps")
     enforce = bool(elig and elig.get("enforce"))
-    if enforce and elig.get("params"):
-        for key, value in elig["params"].items():
-            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
-                setattr(perps_setup, key, float(value))
+    # The plan and exit rule: the study's choice while it is in force, the
+    # module's own defaults otherwise (never a stale earlier choice).
+    chosen = (elig.get("params") or {}) if enforce else {}
+    for key, default in _PLAN_DEFAULTS.items():
+        value = chosen.get(key)
+        setattr(perps_setup, key, float(value) if value is not None else default)
     if enforce and coin not in set(elig.get("symbols") or []):
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"ticker": ticker, "entry_system": "setup", "should_enter": False, "model_ok": False, "setup_valid": False,
@@ -2453,6 +2455,9 @@ def _trade_record(
 EXCHANGE_BRACKETS = _env_flag("PERPS_EXCHANGE_BRACKETS", True)
 
 
+_PLAN_DEFAULTS = {key: float(getattr(perps_setup, key)) for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")}
+
+
 def _attach_exchange_bracket(position: dict[str, Any], tick_size: float) -> None:
     """Put the position's planned stop/target on Kalshi (whole position).
     A failure is recorded on the position, never raised -- the bot's own
@@ -2826,6 +2831,11 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         except Exception as exc:
                             logger.debug("[perps_strategy] pre-exit correlation study failed for %s: %s", ticker, exc)
 
+                if perps_setup.has_plan(position) and perps_setup.plan_update(position, current_price):
+                    # Break-even reached: the stop is now the entry price, on
+                    # Kalshi too.
+                    logger.info("[perps_strategy] %s break-even: stop moved to entry %.6g", ticker, position["setup_stop_price"])
+                    _attach_exchange_bracket(position, tick_size)
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
                     current_volatility=current_volatility, now=now,
@@ -3457,6 +3467,9 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 if setup_plan is not None:
                     entry_context.update({
                         "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
+                        "setup_initial_stop_price": setup_plan["stop"],
+                        "setup_max_hold_minutes": float(perps_setup.MAX_HOLD_HOURS) * 60.0,
+                        "setup_breakeven_r": float(perps_setup.BREAKEVEN_R),
                         "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"],
                         "setup_rr_net": setup_plan["rr_net"], "setup_risk_pct": setup_plan["risk_pct"],
                         "setup_chart_plan": candidate["setup_plan"], "setup_checks": candidate.get("setup_checks"),

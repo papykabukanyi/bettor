@@ -72,7 +72,11 @@ def test_kalshi_study_symbols_are_what_alpaca_charts():
     k15 = job._study_symbols("kalshi15m")  # noqa: SLF001
     assert {"BTC", "ADA", "GOLD", "WTI", "NATGAS"} <= set(k15) and "NEAR" not in k15
     assert (1.5, 3.0) in job.study_grid("perps") and (0.5, 2.0) in job.study_grid("kalshi15m")
-    assert len(job.study_grid("perps")) == 16 and (2.0, 4.0) in job.study_grid("kalshi15m")
+    assert len(job.study_grid("kalshi15m")) == 16 and (2.0, 4.0) in job.study_grid("kalshi15m")
+    # perps: wider stops (to 4x) and, on each, 6 exit rules -- time exits and the break-even stop
+    assert len(job.study_grid("perps")) == 28 and (4.0, 3.0) in job.study_grid("perps")
+    assert len(job.grid_labels("perps")) == 168 and job.default_param("perps") in job.grid_labels("perps")
+    assert "1.5:3.0:8.0:1.0" in job.grid_labels("perps")
     assert job.study_grid("stocks") == list(job.PARAM_GRID)
 
 
@@ -174,7 +178,7 @@ def test_a_study_of_an_older_version_is_run_again(monkeypatch):
     monkeypatch.setattr(job, "archive_ready", lambda bot: True)
     monkeypatch.setattr(job, "eligibility", lambda bot: None)
     monkeypatch.setattr(job, "_running", lambda name: False)
-    grid = [f"{a}:{b}" for a, b in job.study_grid("kalshi15m")]
+    grid = job.grid_labels("kalshi15m")
     import json as _json
     (job.LOCAL_DIR / "kalshi15m_multiyear.json").write_text(_json.dumps({"grid": grid}))  # version 1
     job.maybe_start_multiyear("kalshi15m")
@@ -242,3 +246,55 @@ def test_the_crypto_bot_skips_a_condition_its_study_found_losing(monkeypatch):
     assert "not eligible" in alpaca_crypto_strategy.evaluate_setup_candidate("AVAX/USD")["reason"]
     monkeypatch.setattr(job, "eligibility", lambda bot: None)
     assert alpaca_crypto_strategy.evaluate_setup_candidate("AVAX/USD")["should_enter"] is True  # nothing proven: nothing enforced
+
+
+def test_perps_exit_rules_are_replayed_on_the_same_entries(monkeypatch):
+    """One pass, one entry, three exit rules on their own timelines: the
+    plain plan rides to the end, the 1-hour hold closes on time, the
+    break-even stop closes at entry after the reversal."""
+    import numpy as np
+    from data import perps_setup
+    t0 = 1_790_000_000 // 300 * 300
+    n = 240
+    close = np.full(n, 100.0)
+    close[40:50] = 101.2   # +1.2R (stop 99): break-even triggers
+    close[50:60] = 99.8    # back below entry, above the 99 stop
+    close[60:] = 100.5
+    df = pd.DataFrame({"ts": t0 + 60 * (np.arange(n) + 1), "open": np.r_[100.0, close[:-1]], "high": close + 0.05,
+                       "low": close - 0.05, "close": close, "volume": 1.0})
+    entry_at = int(t0 + 30 * 60)
+
+    def fake_evaluate(ctx, as_of, **kw):
+        if int(as_of) != entry_at:
+            return {"valid": False, "reason": "trend"}
+        return {"valid": True, "side": "long", "setup_id": "s1", "setup": "breakout", "checks": {},
+                "plan": {"stop": 99.0, "target": 110.0, "rr_net": 9.0}}
+
+    monkeypatch.setattr(perps_setup, "evaluate", fake_evaluate)
+    t = perps_setup.replay(df, sides=("long",), fee_rate_roundtrip=0.0, spread_bps=0.0,
+                           exits=[(1440.0, 0.0), (60.0, 0.0), (1440.0, 1.0)])
+    by = {(r.hold_h, r.be_r): r for r in t.itertuples()}
+    assert len(t) == 3 and set(t.entry_ts) == {entry_at + 60}
+    assert by[(24.0, 0.0)].exit == "max_hold_safety" and by[(24.0, 0.0)].gross_return == pytest.approx(0.005)
+    assert by[(1.0, 0.0)].exit == "time_exit"
+    assert by[(24.0, 1.0)].exit == "breakeven" and by[(24.0, 1.0)].gross_return == pytest.approx(0.0)
+
+
+def test_a_perps_study_trade_carries_its_full_setting(monkeypatch):
+    from data import alpaca_news_history, perps_setup
+    candles = pd.read_parquet(__import__("pathlib").Path(__file__).parent / "fixtures" / "setup_btc_1m.parquet")
+    monkeypatch.setattr(job, "_study_candles", lambda sym: (candles, "utc_day"))
+    monkeypatch.setattr(alpaca_news_history, "load", lambda **kw: pd.DataFrame())
+    t0 = int(candles.ts.iloc[-1])
+    seen = []
+
+    def fake_replay(df, **kw):
+        seen.append(kw["exits"])
+        return pd.DataFrame([{"entry_ts": t0, "side": "long", "net_return": 0.01, "leader_corr": 0.9, "leader_dir": "up",
+                              "hold_h": h / 60.0, "be_r": b} for h, b in kw["exits"]])
+
+    monkeypatch.setattr(perps_setup, "replay", fake_replay)
+    out = job._multiyear_kalshi_symbol(("perps", "BTC", [(1.5, 3.0)], {"fee_rate_roundtrip": 0.001, "spread_bps": 5.0}))  # noqa: SLF001
+    assert seen == [[(h * 60.0, b) for h, b in job.PERPS_EXITS]]
+    assert sorted(out.param) == sorted(job._param_label(1.5, 3.0, h, b) for h, b in job.PERPS_EXITS)  # noqa: SLF001
+    assert job._param_values("2.5:3.0:8.0:1.0") == {"STOP_BUFFER_ATR15": 2.5, "MIN_RR": 3.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 1.0}  # noqa: SLF001

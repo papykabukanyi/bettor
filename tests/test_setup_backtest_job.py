@@ -197,7 +197,7 @@ def test_a_just_published_study_is_not_launched_again(monkeypatch):
     launched = []
     monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
     monkeypatch.setattr(job, "archive_ready", lambda bot: True)
-    grid = [f"{a}:{b}" for a, b in job.study_grid("perps")]
+    grid = job.grid_labels("perps")
     (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "computed_at": "x",
                                                                    "version": job.STUDY_VERSION.get("perps", 1)}))
     assert job.maybe_start_multiyear("perps")["action"] == "already_published" and launched == []
@@ -243,8 +243,7 @@ def test_a_study_that_died_after_its_replays_resumes_at_the_analysis(monkeypatch
     replay again."""
     monkeypatch.setattr(job, "_study_symbols", lambda bot: ["BTC", "ETH"])
     monkeypatch.setattr(job, "study_grid", lambda bot: [(1.0, 2.0)])
-    grid = ["1.0:2.0"]
-    job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": grid})  # noqa: SLF001
+    job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": job.grid_labels("perps")})  # noqa: SLF001
     for sym in ("BTC", "ETH"):
         job._save_part("perps", sym, _fake_part(sym))  # noqa: SLF001
 
@@ -298,7 +297,7 @@ def test_replays_saved_with_a_doubled_column_still_analyse(monkeypatch):
     one, so the restarted study finishes instead of failing again."""
     monkeypatch.setattr(job, "_study_symbols", lambda bot: ["BTC"])
     monkeypatch.setattr(job, "study_grid", lambda bot: [(1.0, 2.0)])
-    job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": ["1.0:2.0"]})  # noqa: SLF001
+    job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": job.grid_labels("perps")})  # noqa: SLF001
     part = _fake_part("BTC")
     doubled = pd.concat([part, part[["side"]]], axis=1)
     doubled.to_pickle(job._parts_dir("perps") / "BTC.pkl")  # noqa: SLF001 -- as the failed run left it
@@ -358,7 +357,7 @@ def test_the_real_money_bots_studies_go_first(monkeypatch):
     monkeypatch.setattr(job, "_running", lambda name: False)
     monkeypatch.setattr(job, "archive_ready", lambda bot: True)
     monkeypatch.setattr(job, "eligibility", lambda bot: None)
-    grid = [f"{a}:{b}" for a, b in job.study_grid("perps")]
+    grid = job.grid_labels("perps")
     (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "version": job.STUDY_VERSION["perps"]}))
     assert job.maybe_start_multiyear("crypto")["action"] == "after_kalshi15m" and launched == []
     assert job.maybe_start_multiyear("kalshi15m")["action"] == "launched" and launched == ["kalshi15m_multiyear"]
