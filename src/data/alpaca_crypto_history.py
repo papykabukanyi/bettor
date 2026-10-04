@@ -37,6 +37,39 @@ def universe() -> list[str]:
     return sorted(kalshi_15m_spot.SPOT_PRODUCTS)
 
 
+def crypto_bot_coins() -> list[str]:
+    """The Alpaca crypto bot's coins beyond the Kalshi ones (its tradable
+    USD/USDT/USDC pairs, stablecoins excluded); empty without Alpaca keys."""
+    try:
+        from data import alpaca_crypto_data
+        from data.alpaca_crypto_setup import STABLECOINS
+        coins = {s.split("/")[0].upper() for s in alpaca_crypto_data.get_crypto_universe()}
+    except Exception:
+        return []
+    return sorted(c for c in coins if c not in STABLECOINS and c not in set(universe()))
+
+
+def all_coins() -> list[str]:
+    return sorted(set(universe()) | set(crypto_bot_coins()))
+
+
+NO_DATA_PATH = "bars_1m/_no_data.json"
+
+
+def _no_data_coins() -> set[str]:
+    """Coins a backfill found no bars for on this venue (not retried)."""
+    token = _hf_token()
+    if not token:
+        return set()
+    try:
+        import json
+
+        from huggingface_hub import hf_hub_download
+        return set(json.loads(Path(hf_hub_download(HF_REPO, NO_DATA_PATH, repo_type="dataset", token=token)).read_text()))
+    except Exception:
+        return set()
+
+
 def _iso(t: dt.datetime) -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -163,19 +196,54 @@ def missing_coins() -> list[str]:
     except Exception:
         files = set()  # the repo doesn't exist yet: every coin is missing
     year = dt.datetime.now(dt.timezone.utc).year
-    return [c for c in universe() if _repo_path(c, year) not in files]
+    skip = _no_data_coins()
+    return [c for c in all_coins() if _repo_path(c, year) not in files and c not in skip]
 
 
 def backfill_missing() -> dict[str, Any]:
+    """Full history for every coin without this year's file (the Kalshi
+    coins and the crypto bot's); coins the venue has no bars for are
+    recorded in NO_DATA_PATH so they are not retried."""
     missing = missing_coins()
     if not missing:
         return {"ok": True, "missing": []}
-    return {**backfill(missing), "missing": missing}
+    result = backfill(missing)
+    year = dt.datetime.now(dt.timezone.utc).year
+    empty = [c for c in missing if not _local_path(c, year).exists()]
+    token = _hf_token()
+    if empty and token:
+        import json
+
+        from huggingface_hub import HfApi
+        try:
+            known = sorted(_no_data_coins() | set(empty))
+            HfApi(token=token).upload_file(path_or_fileobj=json.dumps(known).encode(), path_in_repo=NO_DATA_PATH,
+                                           repo_id=HF_REPO, repo_type="dataset", commit_message="coins with no bars on this venue")
+        except Exception as exc:
+            logger.warning("[alpaca_crypto_history] could not record no-data coins: %s", exc)
+    return {**result, "missing": missing, "no_data": empty}
+
+
+def crypto_bot_ready() -> bool:
+    """True once every crypto-bot coin has this year's file or is known to
+    have no bars on this venue (the crypto bot's study waits for this)."""
+    token = _hf_token()
+    if not token:
+        return False
+    try:
+        from huggingface_hub import HfApi
+        files = set(HfApi(token=token).list_repo_files(HF_REPO, repo_type="dataset"))
+    except Exception:
+        return False
+    year = dt.datetime.now(dt.timezone.utc).year
+    skip = _no_data_coins()
+    coins = crypto_bot_coins()
+    return bool(coins) and all(_repo_path(c, year) in files or c in skip for c in coins)
 
 
 def append_recent(coins: list[str] | None = None, *, days: int = 3) -> dict[str, Any]:
     """Daily top-up: the last few days for every coin, merged into HF."""
-    coins = coins or universe()
+    coins = coins or [c for c in all_coins() if c not in _no_data_coins()]
     now = dt.datetime.now(dt.timezone.utc)
     written: list[tuple[str, int]] = []
     for coin in coins:

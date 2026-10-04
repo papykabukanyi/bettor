@@ -34,13 +34,38 @@ SYMBOLS_PER_REQUEST = 40
 COLUMNS = ["id", "created_at", "headline", "summary", "symbols", "source", "url", "score"]
 
 
-def universe() -> list[str]:
-    """News tickers for every Kalshi coin and commodity, plus SPY/QQQ."""
+def base_universe() -> list[str]:
+    """News tickers for every Kalshi coin and commodity, plus SPY/QQQ (what
+    the archive was first built with)."""
     from data import alpaca_news, kalshi_15m_setup, kalshi_15m_spot
     syms = {f"{c}USD" for c in kalshi_15m_spot.SPOT_PRODUCTS}
     for asset in kalshi_15m_setup.METAL_CHART_SYMBOL:
         syms |= set(alpaca_news.news_symbols(asset))
     return sorted(syms | {"SPY", "QQQ"})
+
+
+def universe() -> list[str]:
+    """base_universe plus the Alpaca crypto bot's coins (BTCUSD-style)."""
+    from data import alpaca_crypto_history
+    return sorted(set(base_universe()) | {f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()})
+
+
+MANIFEST = "news/_symbols.json"
+
+
+def covered_symbols() -> list[str]:
+    """The tickers every stored month already covers (base_universe for an
+    archive built before the manifest existed)."""
+    token = _hf_token()
+    if token:
+        try:
+            import json
+
+            from huggingface_hub import hf_hub_download
+            return json.loads(Path(hf_hub_download(HF_REPO, MANIFEST, repo_type="dataset", token=token)).read_text())
+        except Exception:
+            pass
+    return base_universe()
 
 
 def _score(text: str) -> float:
@@ -161,28 +186,66 @@ def _write(key: str, df: pd.DataFrame) -> None:
     os.replace(tmp, path)
 
 
+def _merge(key: str, new: pd.DataFrame) -> pd.DataFrame:
+    """A month's stored articles (local, else HF) unioned with new ones."""
+    path = _local_path(key)
+    frames = [new]
+    if path.exists():
+        frames.insert(0, pd.read_parquet(path))
+    elif _hf_token():
+        try:
+            from huggingface_hub import hf_hub_download
+            frames.insert(0, pd.read_parquet(hf_hub_download(HF_REPO, _repo_path(key), repo_type="dataset", token=_hf_token())))
+        except Exception:
+            pass
+    return pd.concat(frames, ignore_index=True).drop_duplicates("id", keep="last").sort_values("created_at").reset_index(drop=True)
+
+
 def backfill(*, start_year: int = START_YEAR, refresh_recent: int = 2) -> dict[str, Any]:
-    """Every month not on HF yet (plus the last `refresh_recent` months,
-    still filling), uploaded in batches as it goes."""
+    """Every month not on HF yet, the last `refresh_recent` months (still
+    filling), and -- for tickers added to the universe since a month was
+    stored -- those tickers' articles merged into every stored month.
+    Uploaded in batches as it goes; the manifest is written last, so an
+    interrupted run picks up again."""
     on_hf = _hf_files()
     months = _months(start_year)
+    wanted = universe()
+    added = sorted(set(wanted) - set(covered_symbols()))
     recent = {_month_key(y, m) for y, m in months[-refresh_recent:]}
-    todo = [(y, m) for y, m in months if _repo_path(_month_key(y, m)) not in on_hf or _month_key(y, m) in recent]
     written, uploaded, articles = [], [], 0
-    for y, m in todo:
+    for y, m in months:
         key = _month_key(y, m)
+        stored = _repo_path(key) in on_hf
+        if stored and key not in recent and not added:
+            continue
+        symbols = added if stored and key not in recent else wanted
         try:
-            df = fetch_month(y, m)
+            df = fetch_month(y, m, symbols=symbols)
         except Exception as exc:
             logger.warning("[alpaca_news_history] %s failed: %s", key, exc)
             continue
-        _write(key, df)
+        merged = _merge(key, df) if stored else df
+        _write(key, merged)
         written.append(key)
         articles += len(df)
         if len(written) - len(uploaded) >= FILES_PER_COMMIT:
             uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
     uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
-    return {"ok": True, "months": len(written), "uploaded": len(uploaded), "articles": articles}
+    if len(uploaded) == len(written) and _hf_token():
+        import json
+
+        from huggingface_hub import HfApi
+        try:
+            HfApi(token=_hf_token()).upload_file(path_or_fileobj=json.dumps(wanted).encode(), path_in_repo=MANIFEST,
+                                                 repo_id=HF_REPO, repo_type="dataset", commit_message="news archive tickers")
+        except Exception as exc:
+            logger.warning("[alpaca_news_history] manifest upload failed: %s", exc)
+    return {"ok": True, "months": len(written), "uploaded": len(uploaded), "articles": articles, "added_tickers": added}
+
+
+def covers(symbols: list[str]) -> bool:
+    """True once the archive covers these tickers in every stored month."""
+    return set(symbols) <= set(covered_symbols())
 
 
 def append_recent() -> dict[str, Any]:

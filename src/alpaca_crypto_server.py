@@ -672,6 +672,17 @@ def _ensure_background_jobs_started() -> None:
             from data import setup_backtest_job
             scheduler.add_job(setup_backtest_job.launch, "cron", hour=4, minute=40, args=["crypto"],
                               id="crypto_setup_backtest", replace_existing=True)
+            # Weekly multi-year study on Alpaca's archives (and once the
+            # archives cover every pair, if none is published yet): the
+            # trained plan setting, the pairs with a profitable record and
+            # the entry conditions (hour, weekday, news, leader, volatility,
+            # US market) that lost -- one study at a time on the Space.
+            scheduler.add_job(setup_backtest_job.launch, "cron", day_of_week="sun", hour=12, minute=0,
+                              args=["crypto_multiyear"], id="crypto_multiyear_study", replace_existing=True)
+            scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=["crypto"],
+                              id="crypto_multiyear_startup", replace_existing=True,
+                              next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                                  minutes=int(os.getenv("SETUP_MULTIYEAR_CRYPTO_STARTUP_DELAY_MIN", "15") or "15")))
             if setup_backtest_job.latest("crypto") is None:
                 scheduler.add_job(setup_backtest_job.launch, "date", args=["crypto"], id="crypto_setup_backtest_startup",
                                   run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=100),

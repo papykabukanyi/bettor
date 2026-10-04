@@ -27,9 +27,12 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
+
+_ET_ZONE = ZoneInfo("America/New_York")
 
 logger = logging.getLogger(__name__)
 
@@ -317,11 +320,16 @@ def _multiyear_symbol(args: tuple) -> pd.DataFrame:
 # so the walk-forward can learn which conditions the setup pays in.
 # ---------------------------------------------------------------------------
 KALSHI_STUDY_BOTS = ("perps", "kalshi15m")
+# Bots whose multi-year study replays Alpaca's minute-bar archives with the
+# entry-condition learning (the Kalshi bots and the Alpaca crypto bot).
+ARCHIVE_STUDY_BOTS = KALSHI_STUDY_BOTS + ("crypto",)
 MULTIYEAR.update({
     # lookback 0: each year's choices are learned from every year before it
     # (the whole archive, expanding), not only the last one.
     "perps": {"module": "perps_setup", "sides": ("long", "short"), "lookback": 0},
     "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long", "short"), "lookback": 0},
+    # Alpaca crypto is spot: long only, every pair it trades.
+    "crypto": {"module": "alpaca_crypto_setup", "sides": ("long",), "lookback": 0},
 })
 # The Kalshi bots search a wider plan grid: every stop distance x every
 # minimum reward/risk (16 settings), each crossed with every coin and the
@@ -329,7 +337,7 @@ MULTIYEAR.update({
 KALSHI_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
     "SETUP_MULTIYEAR_KALSHI_PARAM_GRID",
     ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
-PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader", "side", "vol_regime")
+PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader", "side", "vol_regime", "us_market")
 VOL_WINDOW_BARS = {"utc_day": 1440, "us_equity": 390}  # one day of 1-minute bars
 VOL_LOOKBACK_DAYS = 90
 PATTERN_MIN_TRADES = int(os.getenv("SETUP_PATTERN_MIN_TRADES", "20") or "20")
@@ -339,7 +347,8 @@ _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 def pattern_features(*, ts: int, side: str, news_count: float | None, news_score: float | None,
-                     leader_corr: float | None, leader_dir: str | None, vol_regime: str | None = None) -> dict[str, str]:
+                     leader_corr: float | None, leader_dir: str | None, vol_regime: str | None = None,
+                     us_market: str | None = None) -> dict[str, str]:
     """The conditions a trade entered in, bucketed the same way in the
     studies and live: 4-hour UTC block, weekday, the news over the prior
     NEWS_HOURS relative to the trade's side, the leader, the side itself and
@@ -359,7 +368,7 @@ def pattern_features(*, ts: int, side: str, news_count: float | None, news_score
         implied = {"up": 1, "down": -1}.get(leader_dir, 0) * (1 if float(leader_corr) > 0 else -1)
         leader = "with" if implied == sign else ("mixed" if implied == 0 else "against")
     return {"hour_block": f"h{t.hour // 4 * 4:02d}", "weekday": _WEEKDAYS[t.weekday()], "news": news, "leader": leader,
-            "side": side, "vol_regime": vol_regime or "n/a"}
+            "side": side, "vol_regime": vol_regime or "n/a", "us_market": us_market or "n/a"}
 
 
 def blocked_reason(blocked: dict[str, list[str]] | None, features: dict[str, str]) -> str | None:
@@ -375,7 +384,7 @@ def _study_candles(sym: str) -> tuple[pd.DataFrame, str]:
     from data import alpaca_crypto_history, alpaca_setup, alpaca_sip_history, kalshi_15m_setup
     if sym in kalshi_15m_setup.METAL_CHART_SYMBOL:
         return alpaca_setup.regular_session_candles(alpaca_sip_history.load(kalshi_15m_setup.METAL_CHART_SYMBOL[sym])), "us_equity"
-    return alpaca_crypto_history.candles(sym), "utc_day"
+    return alpaca_crypto_history.candles(sym.split("/")[0].upper()), "utc_day"
 
 
 def _daily_vol(candles: pd.DataFrame, session: str) -> pd.Series:
@@ -433,20 +442,57 @@ def vol_regime_now(candles: pd.DataFrame | None, thresholds: list[float] | None,
     return "low" if x < thresholds[0] else "high" if x > thresholds[1] else "normal"
 
 
-def _annotate(trades: pd.DataFrame, sym: str, news_idx, regimes: list[str] | None = None) -> pd.DataFrame:
+def us_market_states(spy: pd.DataFrame | None, entry_ts) -> list[str]:
+    """Where the US stock market stood at each entry: 'up' / 'down' (SPY's
+    last regular-session close vs that session's open) or 'closed' --
+    SPY's regular-session 1-minute candles (ts = END), no lookahead."""
+    out = []
+    if spy is None or spy.empty:
+        return ["n/a"] * len(entry_ts)
+    d = spy.sort_values("ts")
+    ts = d["ts"].to_numpy("int64")
+    day = pd.to_datetime(d["ts"] - 60, unit="s", utc=True).dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d").to_numpy()
+    first_open = pd.Series(d["open"].to_numpy(float)).groupby(day).transform("first").to_numpy()
+    close = d["close"].to_numpy(float)
+    for t in entry_ts:
+        i = int(np.searchsorted(ts, int(t), side="right")) - 1
+        et = dt.datetime.fromtimestamp(int(t), dt.timezone.utc).astimezone(_ET_ZONE)
+        in_session = et.weekday() < 5 and (9 * 60 + 30) <= et.hour * 60 + et.minute < 16 * 60
+        if not in_session:
+            out.append("closed")
+        elif i < 0 or day[i] != et.strftime("%Y-%m-%d") or int(t) - ts[i] > 600:
+            out.append("n/a")
+        else:
+            out.append("up" if close[i] >= first_open[i] else "down")
+    return out
+
+
+def us_market_now(now: float | None = None) -> str:
+    """Live: the same reading from SPY's Alpaca bars (stream on top)."""
+    try:
+        from data import alpaca_data, alpaca_setup, alpaca_stream
+        bars = alpaca_stream.merge_live("stocks", "SPY", alpaca_data.fetch_recent_minute_bars("SPY"))
+        return us_market_states(alpaca_setup.regular_session_candles(bars), [int(now or time.time())])[0]
+    except Exception:
+        return "n/a"
+
+
+def _annotate(trades: pd.DataFrame, sym: str, news_idx, regimes: list[str] | None = None,
+              us_market: list[str] | None = None) -> pd.DataFrame:
     rows = []
     for k, r in enumerate(trades.itertuples(index=False)):
         n = news_idx.at(int(r.entry_ts), hours=NEWS_HOURS) if news_idx is not None else {"count": 0.0, "score": 0.0}
         rows.append(pattern_features(ts=int(r.entry_ts), side=r.side, news_count=n["count"], news_score=n["score"],
                                      leader_corr=getattr(r, "leader_corr", None), leader_dir=getattr(r, "leader_dir", None),
-                                     vol_regime=regimes[k] if regimes else None)
+                                     vol_regime=regimes[k] if regimes else None, us_market=us_market[k] if us_market else None)
                     | {"news_count": n["count"], "news_score": n["score"]})
     return pd.concat([trades.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
 
 
 def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
-    """One perps/15m study symbol over Alpaca's whole archive, once per plan
-    setting, each trade annotated with its entry conditions."""
+    """One perps / 15m / Alpaca-crypto study symbol over Alpaca's whole
+    archive, once per plan setting, each trade annotated with its entry
+    conditions."""
     bot, sym, grid, cost = args
     try:
         os.nice(15)
@@ -464,6 +510,8 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
     archive = alpaca_news_history.load()
     news_idx = alpaca_news_history.NewsIndex(archive, alpaca_news.news_symbols(sym)) if not archive.empty else None
     del archive
+    from data import alpaca_setup, alpaca_sip_history
+    spy = alpaca_setup.regular_session_candles(alpaca_sip_history.load("SPY"))
     default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
     frames = []
     vprep = vol_prep(candles, session)  # the coin's volatility, once for every setting
@@ -474,13 +522,16 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
                          spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
                          session=session, leader_session=lead_session)
+        elif bot == "crypto":
+            t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
+                         spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym)
         else:
             t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead if not lead.empty else None,
                                  leader_symbol=lead_sym, session=session, leader_session=lead_session,
                                  minute_average=m.settles_on_minute_average(sym))
         if not t.empty:
             regimes, now = vol_regimes(None, t["entry_ts"].to_numpy("int64"), session, prep=vprep)
-            frames.append(_annotate(t, sym, news_idx, regimes).assign(
+            frames.append(_annotate(t, sym, news_idx, regimes, us_market_states(spy, t["entry_ts"].to_numpy("int64"))).assign(
                 symbol=sym, param=f"{setting[0]}:{setting[1]}", vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
     cache.__exit__()
     m.STOP_BUFFER_ATR15, m.MIN_RR = default
@@ -493,6 +544,20 @@ def _kalshi_study_costs(bot: str, symbols: list[str]) -> dict[str, dict[str, flo
     1-5 in the Kalshi quote archive (the overall median for coins without
     quotes yet)."""
     costs: dict[str, dict[str, float]] = {}
+    if bot == "crypto":
+        from data import alpaca_client, alpaca_crypto_setup, alpaca_crypto_strategy
+        fee = 2 * float(alpaca_crypto_strategy.TAKER_FEE_RATE)
+        for sym in symbols:
+            spread = None
+            try:
+                q = alpaca_client.get_crypto_latest_quote(sym)  # the venue its orders execute on
+                bid, ask = float(q.get("bp") or 0), float(q.get("ap") or 0)
+                if 0 < bid <= ask:
+                    spread = (ask - bid) / ((ask + bid) / 2) * 1e4
+            except Exception:
+                spread = None
+            costs[sym] = {"fee_rate_roundtrip": fee, "spread_bps": spread if spread is not None else float(alpaca_crypto_setup.SPREAD_BPS)}
+        return costs
     if bot == "perps":
         from data import kalshi_15m_spot, perps_setup, perps_strategy
         from data.kalshi_perps import KNOWN_PERP_TICKERS, get_margin_market
@@ -717,13 +782,15 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     frames = []
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
-    if bot in KALSHI_STUDY_BOTS:
+    if bot in ARCHIVE_STUDY_BOTS:
         # Archives to local disk once, before the workers read them.
         from data import alpaca_news_history
         alpaca_news_history.load()
         for sym in sorted(set(symbols) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in symbols}):
             _study_candles(sym)
         costs = _kalshi_study_costs(bot, symbols)
+        from data import alpaca_sip_history
+        alpaca_sip_history.load("SPY")
         jobs = {sym: (_multiyear_kalshi_symbol, (bot, sym, grid, costs[sym])) for sym in symbols}
     else:
         jobs = {sym: (_multiyear_symbol, (sym, cfg["module"], cfg["sides"], grid or [None])) for sym in symbols}
@@ -760,7 +827,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
         result["walk_forward"] = walk_forward_eligibility(base, lookback_years=lookback)
         if "param" in trades and trades["param"].nunique() > 1:
             result["trained"] = walk_forward_trained(trades, default_param=default_param, lookback_years=lookback)
-        if all(f in trades for f in PATTERN_FEATURES):
+        if {"hour_block", "weekday"} <= set(trades.columns):
             result["patterns"] = walk_forward_patterns(trades, default_param=default_param, lookback_years=lookback)
         if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
             th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
@@ -825,7 +892,7 @@ def study_grid(bot: str) -> list[tuple[float, float]]:
     """The plan settings a bot's study replays: PARAM_GRID for stocks and
     options; KALSHI_PARAM_GRID plus the module's own current setting (so the
     baseline is real) for perps and the 15m bot."""
-    if bot not in KALSHI_STUDY_BOTS:
+    if bot not in ARCHIVE_STUDY_BOTS:
         return list(PARAM_GRID)
     import importlib
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
@@ -839,6 +906,14 @@ def _study_symbols(bot: str) -> list[str]:
         from data.perps_data import coin_for_ticker
         coins = {kalshi_15m_spot.chart_coin(coin_for_ticker(t)) for t in KNOWN_PERP_TICKERS}
         return sorted(c for c in coins if c in kalshi_15m_spot.SPOT_PRODUCTS) + ["GOLD", "SILVER"]
+    if bot == "crypto":
+        # Every coin the crypto bot can trade, read as its /USD pair on the
+        # Alpaca archive (pairs quoted in USDT/USDC chart the same coin).
+        from data import alpaca_crypto_history
+        year = dt.datetime.now(dt.timezone.utc).year
+        coins = sorted(set(alpaca_crypto_history.universe()) | set(alpaca_crypto_history.crypto_bot_coins()))
+        have = [c for c in coins if alpaca_crypto_history.load(c, years=[year]).shape[0] > 0]
+        return [f"{c}/USD" for c in have]
     if bot == "kalshi15m":
         from data import kalshi_15m_setup, kalshi_15m_spot, kalshi_15m_strategy
         return sorted(c for c in kalshi_15m_strategy.ACTIVE_ENTRY_COINS
@@ -852,6 +927,15 @@ def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
     """True once the SIP archive on HF holds this year's file for (nearly)
     every symbol the study replays -- never start on a partial upload. The
     Kalshi bots also need the Alpaca crypto and news archives complete."""
+    if bot == "crypto":
+        from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
+        try:
+            tickers = [f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()]
+            return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_crypto_history.crypto_bot_ready()
+                    and alpaca_news_history.archive_ready() and alpaca_news_history.covers(tickers)
+                    and "SPY" not in alpaca_sip_history.missing_symbols())
+        except Exception:
+            return False
     if bot in KALSHI_STUDY_BOTS:
         from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
         try:

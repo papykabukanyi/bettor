@@ -20,7 +20,8 @@ def _local_dir(tmp_path, monkeypatch):
 
 def test_entry_conditions_are_bucketed_relative_to_the_trade():
     f = job.pattern_features(ts=T_SUN_10UTC, side="long", news_count=3, news_score=0.4, leader_corr=0.8, leader_dir="down")
-    assert f == {"hour_block": "h08", "weekday": "sun", "news": "with", "leader": "against", "side": "long", "vol_regime": "n/a"}
+    assert f == {"hour_block": "h08", "weekday": "sun", "news": "with", "leader": "against", "side": "long", "vol_regime": "n/a",
+                 "us_market": "n/a"}
     f = job.pattern_features(ts=T_SUN_10UTC, side="short", news_count=3, news_score=0.4, leader_corr=0.8, leader_dir="down")
     assert f["news"] == "against" and f["leader"] == "with"
     assert job.pattern_features(ts=T_SUN_10UTC, side="long", news_count=0, news_score=0.0, leader_corr=0.2,
@@ -198,3 +199,41 @@ def test_volatility_regime_has_no_lookahead_and_matches_live():
     assert now and now[0] < now[1]
     assert job.vol_regime_now(candles.tail(2000), now, "utc_day") == "high"
     assert job.vol_regime_now(candles.tail(2000), None, "utc_day") == "n/a"
+
+
+def test_the_us_market_condition_reads_spy_without_lookahead():
+    # SPY's 2026-10-01 session (EDT): opens 13:30 UTC; rises, then falls below the open.
+    t0 = int(pd.Timestamp("2026-10-01T13:31:00Z").timestamp())  # end of the first minute
+    spy = pd.DataFrame({"ts": [t0, t0 + 60, t0 + 3600], "open": [100.0, 100.5, 99.0], "high": [100.6, 101.0, 99.5],
+                        "low": [99.9, 100.4, 98.8], "close": [100.5, 100.9, 99.2], "volume": [1.0, 1.0, 1.0]})
+    states = job.us_market_states(spy, [t0 + 120, t0 + 3660, int(pd.Timestamp("2026-10-03T15:00:00Z").timestamp())])
+    assert states == ["up", "down", "closed"]  # a Saturday is closed
+    assert job.us_market_states(None, [t0]) == ["n/a"]
+
+
+def test_the_crypto_bot_is_studied_long_only_on_its_pairs(monkeypatch):
+    from data import alpaca_crypto_history, alpaca_crypto_setup
+    assert job.MULTIYEAR["crypto"]["sides"] == ("long",) and job.MULTIYEAR["crypto"]["lookback"] == 0
+    assert "crypto" in job.ARCHIVE_STUDY_BOTS and len(job.study_grid("crypto")) >= 16
+    monkeypatch.setattr(alpaca_crypto_history, "crypto_bot_coins", lambda: ["AVAX", "UNI"])
+    monkeypatch.setattr(alpaca_crypto_history, "load", lambda coin, years=None: pd.DataFrame({"ts": [1]}) if coin != "UNI" else pd.DataFrame())
+    syms = job._study_symbols("crypto")  # noqa: SLF001
+    assert "AVAX/USD" in syms and "BTC/USD" in syms and "UNI/USD" not in syms  # no archive, not studied
+    assert alpaca_crypto_setup.leader_for("AVAX/USD") == "BTC/USD"
+
+
+def test_the_crypto_bot_skips_a_condition_its_study_found_losing(monkeypatch):
+    from data import alpaca_crypto_setup, alpaca_crypto_strategy, alpaca_news
+    monkeypatch.setattr(alpaca_news, "sentiment", lambda s: {"sentiment_score": 0.0, "headline_volume": 0})
+    monkeypatch.setattr(alpaca_crypto_setup, "live_setup", lambda symbol, **kw: {
+        "valid": True, "side": "long", "setup": "breakout_retest", "setup_id": "x1", "plan": {"stop": 1.0, "target": 2.0, "rr_net": 2.5},
+        "checks": {"correlation": {"corr": 0.8, "leader_dir": "up"}}, "chart_source": "test", "chart_price": 1.5})
+    monkeypatch.setattr(job, "us_market_now", lambda now=None: "down")
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": True, "symbols": ["AVAX/USD"], "rule": "r",
+                                                          "blocked": {"us_market": ["down"]}})
+    r = alpaca_crypto_strategy.evaluate_setup_candidate("AVAX/USDT")
+    assert r["should_enter"] is False and "us_market=down" in r["reason"]
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": True, "symbols": ["BTC/USD"], "rule": "r"})
+    assert "not eligible" in alpaca_crypto_strategy.evaluate_setup_candidate("AVAX/USD")["reason"]
+    monkeypatch.setattr(job, "eligibility", lambda bot: None)
+    assert alpaca_crypto_strategy.evaluate_setup_candidate("AVAX/USD")["should_enter"] is True  # nothing proven: nothing enforced

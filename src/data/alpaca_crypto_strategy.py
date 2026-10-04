@@ -333,14 +333,31 @@ SETUP_IDS_REMEMBERED = 500
 
 
 def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
-    from data import alpaca_crypto_setup, alpaca_news
+    from data import alpaca_crypto_setup, alpaca_news, setup_backtest_job
 
     fee = 2 * TAKER_FEE_RATE
+    # Multi-year evidence (setup_backtest_job.run_multiyear on Alpaca's
+    # archives): when the walk-forward proves it, the trained plan setting,
+    # the coins with a profitable record and the entry conditions that lost.
+    # A pair is judged on its coin's /USD study (XRP/USDT -> XRP/USD).
+    study_symbol = f"{symbol.split('/')[0].upper()}/USD"
+    elig = setup_backtest_job.eligibility("crypto")
+    enforce = bool(elig and elig.get("enforce"))
+    if enforce and elig.get("params"):
+        for key, value in elig["params"].items():
+            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
+                setattr(alpaca_crypto_setup, key, float(value))
+    if enforce and study_symbol not in set(elig.get("symbols") or []):
+        detail = f"no profitable multi-year record ({elig.get('rule')})"
+        return {"symbol": symbol, "entry_system": "setup", "should_enter": False, "score": 0.0, "model_ok": False,
+                "setup_valid": False, "setup_reason": "eligibility", "reason": f"not eligible: {detail}",
+                "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
+    news, news_count = None, None
     try:
-        news = alpaca_news.sentiment(symbol).get("sentiment_score")
+        news_info = alpaca_news.sentiment(symbol)
+        news, news_count = news_info.get("sentiment_score"), news_info.get("headline_volume")
     except Exception as exc:
         logger.debug("[alpaca_crypto_strategy] sentiment read failed for %s: %s", symbol, exc)
-        news = None
     try:
         setup = alpaca_crypto_setup.live_setup(symbol, fee_rate_roundtrip=fee, news_score=news)
     except Exception as exc:
@@ -359,6 +376,23 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
         return result
     if setup["setup_id"] in traded_setup_ids:
         result["reason"] = f"{setup['setup']} already traded ({setup['setup_id']})"
+        return result
+    blocked_now = (elig.get("blocked") or {}) if enforce else {}
+    corr = (setup.get("checks") or {}).get("correlation") or {}
+    regime = "n/a"
+    thresholds = ((elig or {}).get("vol_thresholds") or {}).get(study_symbol)
+    if thresholds:
+        try:
+            regime = setup_backtest_job.vol_regime_now(alpaca_crypto_setup.chart_candles(symbol)[0], thresholds, "utc_day")
+        except Exception as exc:
+            logger.debug("[alpaca_crypto_strategy] volatility regime unavailable for %s: %s", symbol, exc)
+    result["entry_conditions"] = setup_backtest_job.pattern_features(
+        ts=int(time.time()), side="long", news_count=news_count, news_score=news,
+        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"), vol_regime=regime,
+        us_market=setup_backtest_job.us_market_now() if "us_market" in blocked_now else None)
+    why = setup_backtest_job.blocked_reason(blocked_now, result["entry_conditions"])
+    if why:
+        result["reason"] = f"{setup['setup']} long: skipped, the study found this condition loses ({why})"
         return result
     plan = setup["plan"]
     result.update(

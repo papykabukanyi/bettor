@@ -76,3 +76,49 @@ def test_one_rejected_ticker_does_not_cost_the_month(monkeypatch):
     monkeypatch.setattr(alpaca_client, "_data_get", fake_get)
     df = nh.fetch_month(2024, 3, symbols=["BADUSD", "BTCUSD"])
     assert df.id.tolist() == [7]
+
+
+def test_added_news_tickers_are_merged_into_every_stored_month(monkeypatch):
+    import datetime as dt
+    now = dt.datetime.now(dt.timezone.utc)
+    months = [(2016, 1), (2016, 2), (now.year, now.month)]
+    monkeypatch.setattr(nh, "_months", lambda start_year: months)
+    monkeypatch.setattr(nh, "_hf_files", lambda: {"news/2016-01.parquet", "news/2016-02.parquet"})
+    monkeypatch.setattr(nh, "universe", lambda: ["BTCUSD", "AVAXUSD"])
+    monkeypatch.setattr(nh, "covered_symbols", lambda: ["BTCUSD"])
+    monkeypatch.setattr(nh, "upload", lambda keys, message: list(keys))
+    asked = []
+
+    def fake_fetch(y, m, symbols=None):
+        asked.append(((y, m), list(symbols)))
+        return pd.DataFrame({"id": [y * 100 + m], "created_at": [1], "headline": ["x"], "summary": [""], "symbols": ["AVAXUSD"],
+                             "source": [""], "url": [""], "score": [0.0]})
+
+    monkeypatch.setattr(nh, "fetch_month", fake_fetch)
+    old = pd.DataFrame({"id": [1], "created_at": [0], "headline": ["old"], "summary": [""], "symbols": ["BTCUSD"],
+                        "source": [""], "url": [""], "score": [0.0]})
+    nh._write("2016-01", old)  # noqa: SLF001
+    r = nh.backfill(start_year=2016, refresh_recent=1)
+    assert asked == [((2016, 1), ["AVAXUSD"]), ((2016, 2), ["AVAXUSD"]), ((now.year, now.month), ["BTCUSD", "AVAXUSD"])]
+    merged = pd.read_parquet(nh._local_path("2016-01"))  # noqa: SLF001
+    assert set(merged.id) == {1, 201601} and r["added_tickers"] == ["AVAXUSD"]
+
+
+def test_the_crypto_bots_coins_join_the_archive_without_blocking_the_kalshi_studies(monkeypatch):
+    import datetime as dt
+    year = dt.datetime.now(dt.timezone.utc).year
+    monkeypatch.setenv("HF_API_KEY", "token")
+    monkeypatch.setattr(ch, "crypto_bot_coins", lambda: ["AVAX", "UNI"])
+    monkeypatch.setattr(ch, "_no_data_coins", lambda: {"UNI"})
+    import huggingface_hub
+
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def list_repo_files(self, repo, repo_type):
+            return [f"bars_1m/{c}/{year}.parquet" for c in ch.universe()]
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    assert ch.missing_coins() == ["AVAX"]  # UNI is known to have no bars on this venue
+    assert ch.archive_ready() is True and ch.crypto_bot_ready() is False  # Kalshi coins complete; AVAX still to come
