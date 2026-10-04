@@ -995,6 +995,13 @@ def _evaluate_candidate_setup(
         seconds_to_close / 60.0,
     )
     side = plan["contract_side"]
+    # Price edge: the contract's fair value off Alpaca's live price minus
+    # Kalshi's ask. Required only once the real-price replay proves a
+    # minimum on weeks it never saw (setup_backtest_job.price_edge_study).
+    info["price_edge"] = round((p_yes_now if side == "yes" else 1.0 - p_yes_now) - float(plan["ask"]), 4)
+    min_edge = setup_backtest_job.price_edge_min()
+    if min_edge is not None and info["price_edge"] < min_edge:
+        return {"ok": False, "reason": f"price_edge_below_min ({info['price_edge']:+.3f} < {min_edge:+.2f})", **info}
     return {
         "ok": True, "coin": coin, "side": side, "market": market,
         "probability_up": p_yes_now, "confidence": p_yes_now if side == "yes" else 1.0 - p_yes_now,

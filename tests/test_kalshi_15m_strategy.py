@@ -3272,3 +3272,23 @@ def test_setup_position_reads_the_live_alpaca_tick(setup_mode, monkeypatch):
     monkeypatch.setattr(kalshi_15m_setup, "live_price", lambda coin: {"price": 66420.0, "kind": "quote_mid", "age_sec": 0.5})
     result = kalshi_15m_strategy.manage_open_positions(dry_run=True)
     assert result["checks"][0]["reason"].startswith("take_profit") and result["checks"][0]["price_source"] == "live quote_mid"
+
+
+def test_setup_mode_buys_yes_only_by_default():
+    """Buying NO on short setups lost in every year of the multi-year study:
+    the live chart reading takes long setups only."""
+    from data import kalshi_15m_setup
+    assert kalshi_15m_setup.SIDES == ("long",)
+
+
+def test_setup_mode_records_the_price_edge_and_requires_a_proven_minimum(setup_mode, monkeypatch):
+    """The contract's fair value (off Alpaca's live price) minus Kalshi's ask
+    is on every candidate; a minimum applies only once the real-price
+    replay proved it on weeks it never saw."""
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "price_edge_min", lambda: None)
+    free = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert free["ok"] is True and isinstance(free["price_edge"], float)
+    monkeypatch.setattr(setup_backtest_job, "price_edge_min", lambda: free["price_edge"] + 0.05)
+    held = kalshi_15m_strategy.evaluate_candidate("BTC")
+    assert held["ok"] is False and held["reason"].startswith("price_edge_below_min")

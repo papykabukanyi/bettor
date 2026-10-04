@@ -94,6 +94,12 @@ MIN_RISK_PCT = _env_float("KALSHI_15M_SETUP_MIN_RISK_PCT", 0.001)
 MAX_RISK_PCT = _env_float("KALSHI_15M_SETUP_MAX_RISK_PCT", 0.03)
 RISK_PER_TRADE_PCT = _env_float("KALSHI_15M_SETUP_RISK_PER_TRADE_PCT", 0.01)  # budget lost if the stop is hit
 NEWS_BLOCK = _env_float("KALSHI_15M_SETUP_NEWS_BLOCK", 0.3)
+# Buying NO on a short setup lost money in every one of the 11 years of the
+# multi-year study (-31% of the price per trade over 307 trades) while
+# buying YES on a long setup broke even: long setups only, unless
+# KALSHI_15M_SETUP_SIDES says otherwise ("long,short").
+SIDES = tuple(x for x in (s.strip() for s in os.getenv("KALSHI_15M_SETUP_SIDES", "long").split(","))
+              if x in ("long", "short")) or ("long",)
 
 # 6. Correlation -- crypto's leader is BTC (ETH for BTC itself); metals follow GOLD (SILVER for GOLD). Over the last
 # CORR_LOOKBACK_5M closed 5-minute returns, when the symbol moves with its
@@ -917,7 +923,7 @@ def live_setup(coin: str, *, news_score: float | None, now: float | None = None,
         except Exception:
             leader_candles = None
     leader = prepare(leader_candles, session=session_for(leader_symbol)) if leader_candles is not None and not leader_candles.empty else None
-    result = evaluate(ctx, as_of, sides=("long", "short"), fee_rate_roundtrip=0.0, spread_bps=0.0, news_score=news_score,
+    result = evaluate(ctx, as_of, sides=SIDES, fee_rate_roundtrip=0.0, spread_bps=0.0, news_score=news_score,
                       leader=leader, leader_symbol=leader_symbol, require_leader=True)
     last_close = float(one_min.sort_values("ts")["close"].iloc[-1])
     rets = np.diff(np.log(one_min.sort_values("ts")["close"].to_numpy(float)[-31:]))
@@ -1004,7 +1010,8 @@ def strategy_card() -> dict[str, Any]:
 def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.DataFrame | None = None,
                    leader_symbol: str | None = None, entry_minutes: tuple[int, ...] = (1, 2, 3, 4, 5),
                    min_seconds_left: int = 600, contracts: int = 10, session: str = SESSION,
-                   leader_session: str | None = None, minute_average: bool = True) -> pd.DataFrame:
+                   leader_session: str | None = None, minute_average: bool = True,
+                   sides: tuple[str, ...] | None = None) -> pd.DataFrame:
     """Multi-year study of this bot's contract trading on real charts: every
     15-minute window of `spot_1m` (ts = end) is a contract settling YES if
     the window closes at or above its open. Charts, setups, stop/target hits
@@ -1055,7 +1062,7 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
                 continue
             as_of = latest_closed_5m(t)
             if as_of not in cache:
-                cache[as_of] = evaluate(ctx, as_of, sides=("long", "short"), leader=leader, leader_symbol=leader_symbol,
+                cache[as_of] = evaluate(ctx, as_of, sides=sides or SIDES, leader=leader, leader_symbol=leader_symbol,
                                         require_leader=leader_1m is not None)
             setup = cache[as_of]
             if not setup.get("valid") or setup["setup_id"] in used:
@@ -1097,7 +1104,8 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
 def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: pd.DataFrame | None = None,
                      leader_symbol: str | None = None, entry_minutes: tuple[int, ...] = (1, 2, 3, 4, 5),
                      min_seconds_left: int = 600, contracts: int = 10, session: str = SESSION,
-                     leader_session: str | None = None, minute_average: bool = True) -> pd.DataFrame:
+                     leader_session: str | None = None, minute_average: bool = True,
+                     sides: tuple[str, ...] | None = None) -> pd.DataFrame:
     """Backtest of this bot's contract trading on real data: `quotes` is one
     coin's per-minute Kalshi archive (kalshi_15m_quotes: ticker, open_ts,
     close_ts, minute, yes_bid, yes_ask, result), `spot_1m` the underlying's
@@ -1106,7 +1114,10 @@ def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: 
     candle; it enters only if contract_plan clears MIN_RR at the real ask
     (taker fee both legs), one entry per window, each setup once. Sold at
     the real bid in the minute the underlying reaches the stop or target,
-    otherwise settled on the real result. P&L per contract after fees."""
+    otherwise settled on the real result. P&L per contract after fees.
+    Each trade also records the contract's fair value from the underlying
+    at entry and `edge` = fair value - the real ask paid (positive: Kalshi
+    priced it below what Alpaca's chart implied) for the price-edge test."""
     from data import kalshi_15m
     fee = lambda p: kalshi_15m.taker_fee_usd(contracts, p) / contracts  # noqa: E731
     spot = spot_1m.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
@@ -1133,7 +1144,7 @@ def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: 
                 continue
             as_of = latest_closed_5m(t)
             if as_of not in cache:
-                cache[as_of] = evaluate(ctx, as_of, sides=("long", "short"), leader=leader, leader_symbol=leader_symbol,
+                cache[as_of] = evaluate(ctx, as_of, sides=sides or SIDES, leader=leader, leader_symbol=leader_symbol,
                                         require_leader=leader_1m is not None)
             setup = cache[as_of]
             if not setup.get("valid") or setup["setup_id"] in used:
@@ -1149,6 +1160,8 @@ def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: 
                 continue
             used.add(setup["setup_id"])
             side, ask = cp["contract_side"], cp["ask"]
+            p_yes = fair_value_yes(cl[i_t], strike, vol, (close_ts - t) / 60.0)
+            fair = p_yes if side == "yes" else 1.0 - p_yes
             stop, target, long_ = setup["plan"]["stop"], setup["plan"]["target"], setup["side"] == "long"
             exit_value, how = None, "settled"
             for k in range(m + 1, 15):
@@ -1165,7 +1178,8 @@ def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: 
             cost = ask + fee(ask)
             pnl = ((1.0 if result == side else 0.0) - cost) if exit_value is None else (exit_value - fee(exit_value) - cost)
             trades.append({"ticker": ticker, "open_ts": int(open_ts), "minute": m, "side": side, "setup_side": setup["side"],
-                           "setup": setup["setup"], "ask": ask, "exit": how, "exit_value": exit_value, "result": result,
+                           "setup": setup["setup"], "ask": ask, "fair": round(fair, 4), "edge": round(fair - ask, 4),
+                           "exit": how, "exit_value": exit_value, "result": result,
                            "planned_rr": cp["rr"], "pnl_per_contract": pnl})
             break
     return pd.DataFrame(trades)

@@ -361,3 +361,29 @@ def test_the_real_money_bots_studies_go_first(monkeypatch):
     (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "version": job.STUDY_VERSION["perps"]}))
     assert job.maybe_start_multiyear("crypto")["action"] == "after_kalshi15m" and launched == []
     assert job.maybe_start_multiyear("kalshi15m")["action"] == "launched" and launched == ["kalshi15m_multiyear"]
+
+
+def _edge_trades():
+    """Four weeks of real-price trades: cheap contracts (edge >= 0.04) win,
+    the rest lose."""
+    rows = []
+    for week in range(4):
+        base = int(pd.Timestamp("2026-09-07", tz="UTC").timestamp()) + week * 7 * 86400
+        for i in range(12):
+            edge = 0.05 if i % 2 else -0.01
+            rows.append({"open_ts": base + i * 3600, "edge": edge, "pnl_per_contract": 0.10 if edge > 0.04 else -0.12})
+    return pd.DataFrame(rows)
+
+
+def test_the_price_edge_threshold_is_chosen_on_earlier_weeks_only():
+    pe = job.price_edge_study(_edge_trades(), min_train_trades=5, min_trades=10)
+    assert [w["min_edge"] for w in pe["weeks"]] == [0.0, 0.0, 0.0]  # the first threshold that keeps only the winners
+    assert pe["out_of_sample"]["avg"] == pytest.approx(0.10) and pe["no_filter"]["avg"] < 0 and pe["enforce"] is True
+    assert pe["by_threshold"]["none"]["trades"] == 48 and pe["min_edge_now"] == 0.0
+
+
+def test_the_live_price_edge_minimum_comes_only_from_a_proven_replay(monkeypatch):
+    monkeypatch.setattr(job, "latest", lambda bot: {"price_edge": {"enforce": False, "min_edge_now": 0.04}})
+    assert job.price_edge_min() is None
+    monkeypatch.setattr(job, "latest", lambda bot: {"price_edge": {"enforce": True, "min_edge_now": 0.04}})
+    assert job.price_edge_min() == 0.04

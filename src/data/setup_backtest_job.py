@@ -118,29 +118,102 @@ def run_perps(days: int) -> dict[str, Any]:
     return {"universe": coins, "costs": costs, "sides": list(sides), **_both(go)}
 
 
+# The 15m bot's real-price replay reads every day of Kalshi's quote archive
+# (it starts Sep 2026), not just the last DAYS: its trades are few.
+KALSHI15M_REPLAY_DAYS = int(os.getenv("SETUP_KALSHI15M_REPLAY_DAYS", "120") or "120")
+PRICE_EDGE_THRESHOLDS = (None, 0.0, 0.02, 0.04, 0.06, 0.08)
+
+
 def run_kalshi15m(days: int) -> dict[str, Any]:
     from data import kalshi_15m_quotes, kalshi_15m_setup, kalshi_15m_spot, kalshi_15m_strategy
+    days = max(days, KALSHI15M_REPLAY_DAYS)
     quotes = kalshi_15m_quotes.load_quote_history(days=days)
     spot = kalshi_15m_spot.load_spot_history(days=days + 2)
-    coins = sorted(c for c in kalshi_15m_strategy.ACTIVE_ENTRY_COINS if c in set(spot["coin"]) and c in set(quotes["coin"]))
+    since = int(time.time()) - (days + 2) * 86400
+    charts: dict[str, pd.DataFrame] = {}
+
+    def chart(coin: str) -> pd.DataFrame:
+        """Crypto: the Kraken-via-Alpaca spot archive; commodities: their
+        SIP ETF's regular session (Alpaca archive)."""
+        if coin not in charts:
+            if coin in kalshi_15m_setup.METAL_CHART_SYMBOL:
+                c = _study_candles(coin)[0]
+                charts[coin] = c[c["ts"] >= since][SPOT_COLUMNS] if not c.empty else pd.DataFrame(columns=SPOT_COLUMNS)
+            else:
+                charts[coin] = spot[spot.coin == coin][SPOT_COLUMNS]
+        return charts[coin]
+
+    coins = sorted(c for c in kalshi_15m_strategy.ACTIVE_ENTRY_COINS if c in set(quotes["coin"])
+                   and (c in set(spot["coin"]) or c in kalshi_15m_setup.METAL_CHART_SYMBOL))
+    live_trades: dict[str, pd.DataFrame] = {}
 
     def go(with_corr: bool) -> dict[str, Any]:
         frames = []
         for coin in coins:
             leader = kalshi_15m_setup.leader_for(coin)
+            if chart(coin).empty:
+                continue
             t = kalshi_15m_setup.replay_contracts(
-                quotes[quotes.coin == coin], spot[spot.coin == coin][SPOT_COLUMNS],
-                leader_1m=spot[spot.coin == leader][SPOT_COLUMNS] if with_corr else None, leader_symbol=leader,
+                quotes[quotes.coin == coin], chart(coin),
+                leader_1m=chart(leader) if with_corr else None, leader_symbol=leader,
                 session=kalshi_15m_setup.session_for(coin), leader_session=kalshi_15m_setup.session_for(leader),
                 minute_average=kalshi_15m_setup.settles_on_minute_average(coin),
             )
             if not t.empty:
                 frames.append(t.assign(symbol=coin))
-        return summarize(pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(), "pnl_per_contract",
-                         unit="usd_per_contract")
+        trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if with_corr:
+            live_trades["t"] = trades
+        return summarize(trades, "pnl_per_contract", unit="usd_per_contract")
 
-    return {"universe": coins, "metals": "not replayed: the only free metals chart (Yahoo COMEX) is ~10 minutes delayed",
-            **_both(go)}
+    out = {"universe": coins, "days": days, "sides": list(kalshi_15m_setup.SIDES), **_both(go)}
+    out["price_edge"] = price_edge_study(live_trades.get("t", pd.DataFrame()))
+    return out
+
+
+def price_edge_study(trades: pd.DataFrame, *, min_train_trades: int = 10, min_trades: int = 20) -> dict[str, Any]:
+    """Does requiring Kalshi's ask to sit below the contract's fair value
+    (priced off Alpaca's chart at entry) improve the setup's record on
+    real Kalshi prices? Per threshold over the whole replay, and walk-
+    forward by week: each week trades the threshold that made the most
+    over the weeks before it (needing min_train_trades), scored on the
+    week itself. Enforced only when that beats no filter, positive, on
+    >= min_trades unseen trades."""
+    label = lambda th: "none" if th is None else f">= {th:+.2f}"  # noqa: E731
+    if trades is None or trades.empty or "edge" not in trades:
+        return {"trades": 0, "enforce": False, "min_edge_now": None}
+    t = trades.dropna(subset=["edge"]).copy()
+    t["week"] = pd.to_datetime(t["open_ts"], unit="s", utc=True).dt.strftime("%G-W%V")
+    pick = lambda df, th: df if th is None else df[df["edge"] >= th]  # noqa: E731
+
+    def best(window: pd.DataFrame):
+        scored = [(pick(window, th)["pnl_per_contract"].sum(), th) for th in PRICE_EDGE_THRESHOLDS
+                  if len(pick(window, th)) >= min_train_trades]
+        return max(scored, key=lambda x: x[0])[1] if scored else None
+
+    weeks = sorted(t["week"].unique())
+    rows, oos = [], []
+    for w in weeks[1:]:
+        th = best(t[t["week"] < w])
+        test = pick(t[t["week"] == w], th)
+        oos.append(test)
+        rows.append({"week": w, "min_edge": th, "result": _trade_stats(test["pnl_per_contract"])})
+    oos_all = pd.concat(oos, ignore_index=True) if oos else pd.DataFrame(columns=["pnl_per_contract"])
+    base = t[t["week"] > weeks[0]] if weeks else t.iloc[0:0]
+    res, plain = _trade_stats(oos_all["pnl_per_contract"]), _trade_stats(base["pnl_per_contract"])
+    enforce = bool(res.get("trades", 0) >= min_trades and (res.get("avg") or 0) > 0 and (res.get("avg") or 0) > (plain.get("avg") or 0))
+    return {"trades": int(len(t)), "weeks": rows, "out_of_sample": res, "no_filter": plain, "enforce": enforce,
+            "min_edge_now": best(t), "by_threshold": {label(th): _trade_stats(pick(t, th)["pnl_per_contract"])
+                                                       for th in PRICE_EDGE_THRESHOLDS},
+            "edge_quantiles": [round(float(x), 4) for x in t["edge"].quantile([0.1, 0.5, 0.9])] if len(t) else None,
+            "rule": "enter only when fair value - ask >= the threshold chosen on the weeks before (unseen week scored)"}
+
+
+def price_edge_min() -> float | None:
+    """The live 15m bot's minimum price edge: the replay's chosen threshold
+    while the walk-forward proves it, else None (no price filter)."""
+    pe = (latest("kalshi15m") or {}).get("price_edge") or {}
+    return float(pe["min_edge_now"]) if pe.get("enforce") and pe.get("min_edge_now") is not None else None
 
 
 def _alpaca_stock_replay(module_name: str, symbols: list[str], days: int, sides: tuple[str, ...]) -> dict[str, Any]:
@@ -327,7 +400,7 @@ MULTIYEAR.update({
     # lookback 0: each year's choices are learned from every year before it
     # (the whole archive, expanding), not only the last one.
     "perps": {"module": "perps_setup", "sides": ("long", "short"), "lookback": 0},
-    "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long", "short"), "lookback": 0},
+    "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long",), "lookback": 0},  # buying NO lost every year
     # Alpaca crypto is spot: long only, every pair it trades.
     "crypto": {"module": "alpaca_crypto_setup", "sides": ("long",), "lookback": 0},
 })
@@ -1114,7 +1187,7 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 # a published study of an older version is re-run on the next start check.
 # perps 2 / kalshi15m 3: every prior year (expanding), side and volatility
 # regime learned too; kalshi15m 2: settles on Kalshi's reference.
-STUDY_VERSION = {"perps": 3, "kalshi15m": 3}
+STUDY_VERSION = {"perps": 3, "kalshi15m": 4}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
@@ -1426,7 +1499,7 @@ def run(bot: str, *, days: int = DAYS, publish: bool = True) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("[setup_backtest] %s replay failed", bot)
         result = {"ok": False, "error": str(exc)}
-    result.update({"bot": bot, "days": days, "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    result.update({"bot": bot, "days": result.get("days", days), "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                    "seconds": round(time.time() - started, 1), "module": MODULES[bot], "hf_repo": REPOS[bot]})
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     (LOCAL_DIR / f"{bot}.json").write_text(json.dumps(result), encoding="utf-8")
