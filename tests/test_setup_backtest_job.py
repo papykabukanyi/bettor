@@ -263,3 +263,30 @@ def test_saved_replays_from_other_settings_are_not_reused():
     job._save_part("perps", "BTC", _fake_part("BTC"))  # noqa: SLF001
     assert set(job._load_parts("perps", {"version": 1, "grid": ["1.0:2.0"]})) == {"BTC"}  # noqa: SLF001
     assert job._load_parts("perps", {"version": 2, "grid": ["1.0:2.0"]}) == {}  # noqa: SLF001
+
+
+def test_a_restarted_study_restores_its_finished_replays_from_hf(monkeypatch, tmp_path):
+    """A deploy restarts the Space and wipes local disk: the replays a study
+    had finished come back from the bot's HF model repo (same version and
+    settings), so it does not start over."""
+    import huggingface_hub
+    key = {"version": 2, "grid": ["1.0:2.0"]}
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "key.json").write_text(json.dumps(key | {"at": __import__("time").time()}))
+    (remote / "BTC.parquet").write_bytes(job._part_bytes(_fake_part("BTC")))  # noqa: SLF001
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo, repo_type=None):
+            return [f"{job.PARTS_PATH}/{p.name}" for p in remote.iterdir()]
+
+    monkeypatch.setenv("HF_API_KEY", "token")
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, path, **kw: str(remote / path.rsplit("/", 1)[1]))
+    parts = job._load_parts("perps", key)  # noqa: SLF001
+    assert list(parts) == ["BTC"] and len(parts["BTC"]) == len(_fake_part("BTC"))
+    assert (job._parts_dir("perps") / "BTC.pkl").exists()  # noqa: SLF001 -- and kept locally from here on
+    assert job._load_parts("perps", {"version": 3, "grid": ["1.0:2.0"]}) == {}  # noqa: SLF001 -- another study's replays are not reused

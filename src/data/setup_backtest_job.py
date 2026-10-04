@@ -780,14 +780,66 @@ def _rss_mb() -> float | None:
         return None
 
 
+PARTS_PATH = "setup_strategy/multiyear/parts"
+
+
 def _parts_dir(bot: str) -> Path:
     return LOCAL_DIR / f"{bot}_multiyear_parts"
 
 
+def _hf_parts(fn, timeout_sec: float = 300):
+    """Best-effort call against the bot's HF model repo (None without a
+    token, on an error or after timeout_sec)."""
+    token = os.getenv("HF_API_KEY", "")
+    if not token:
+        return None
+    try:
+        from huggingface_hub import HfApi
+
+        from server_common import call_with_hard_timeout
+        return call_with_hard_timeout(lambda: fn(HfApi(token=token)), timeout_sec=timeout_sec)
+    except Exception as exc:
+        logger.warning("[setup_backtest] study parts on HF: %s", exc)
+        return None
+
+
+def _part_bytes(trades: pd.DataFrame) -> bytes:
+    import io
+    buf = io.BytesIO()
+    try:
+        trades.to_parquet(buf, index=False)
+    except Exception:  # a mixed-type column: keep it as text
+        buf = io.BytesIO()
+        trades.astype({c: str for c in trades.select_dtypes(include="object").columns}).to_parquet(buf, index=False)
+    return buf.getvalue()
+
+
+def _restore_parts_from_hf(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFrame] | None:
+    """The replays a study had finished before the Space restarted (a
+    deploy wipes local disk), from the bot's HF model repo."""
+    def fetch(api):
+        from huggingface_hub import hf_hub_download
+        repo = REPOS[bot]
+        token = os.getenv("HF_API_KEY", "")
+        if f"{PARTS_PATH}/key.json" not in set(api.list_repo_files(repo, repo_type="model")):
+            return None
+        saved = json.loads(Path(hf_hub_download(repo, f"{PARTS_PATH}/key.json", repo_type="model", token=token)).read_text())
+        if {k: saved.get(k) for k in key} != key or time.time() - float(saved.get("at", 0)) > 2 * 86400:
+            return None
+        out = {}
+        for f in api.list_repo_files(repo, repo_type="model"):
+            if f.startswith(f"{PARTS_PATH}/") and f.endswith(".parquet"):
+                sym = f.rsplit("/", 1)[1][: -len(".parquet")].replace("__", "/")
+                out[sym] = pd.read_parquet(hf_hub_download(repo, f, repo_type="model", token=token))
+        return out
+    return _hf_parts(fetch, timeout_sec=600)
+
+
 def _load_parts(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFrame]:
     """Symbols this study already replayed (same version and settings, in
-    the last two days): a run that died after its replays resumes at the
-    analysis instead of replaying the whole archive again."""
+    the last two days) -- on local disk, or on HF after a restart: a run
+    that died or was restarted resumes where it stopped instead of
+    replaying the whole archive again."""
     d = _parts_dir(bot)
     try:
         saved = json.loads((d / "key.json").read_text(encoding="utf-8"))
@@ -797,7 +849,21 @@ def _load_parts(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFrame]:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True, exist_ok=True)
+        restored = _restore_parts_from_hf(bot, key)
         (d / "key.json").write_text(json.dumps(key | {"at": time.time()}), encoding="utf-8")
+        if restored:
+            for sym, t in restored.items():
+                _save_part(bot, sym, t, upload=False)
+            return restored
+
+        def fresh(api):
+            from huggingface_hub import CommitOperationAdd, CommitOperationDelete
+            ops = [CommitOperationAdd(f"{PARTS_PATH}/key.json", json.dumps(key | {"at": time.time()}).encode())]
+            if any(f.startswith(f"{PARTS_PATH}/") for f in api.list_repo_files(REPOS[bot], repo_type="model")):
+                ops.insert(0, CommitOperationDelete(f"{PARTS_PATH}/"))
+            api.create_commit(repo_id=REPOS[bot], repo_type="model", operations=ops, commit_message=f"{bot} study: new run")
+            return True
+        _hf_parts(fresh)
         return {}
     done = {}
     for f in d.glob("*.pkl"):
@@ -808,10 +874,15 @@ def _load_parts(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFrame]:
     return done
 
 
-def _save_part(bot: str, sym: str, trades: pd.DataFrame) -> None:
-    tmp = _parts_dir(bot) / f"{sym.replace('/', '__')}.pkl.tmp"
+def _save_part(bot: str, sym: str, trades: pd.DataFrame, *, upload: bool = True) -> None:
+    name = sym.replace("/", "__")
+    tmp = _parts_dir(bot) / f"{name}.pkl.tmp"
     trades.to_pickle(tmp)
     tmp.rename(tmp.with_suffix(""))
+    if upload:
+        data = _part_bytes(trades)
+        _hf_parts(lambda api: api.upload_file(path_or_fileobj=data, path_in_repo=f"{PARTS_PATH}/{name}.parquet", repo_id=REPOS[bot],
+                                              repo_type="model", commit_message=f"{bot} study: {sym} replayed"))
 
 
 def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
@@ -950,13 +1021,16 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
     if not token:
         return False
     try:
-        from huggingface_hub import CommitOperationAdd, HfApi
+        from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
         eligibility = _eligibility_from(result)
         ops = [CommitOperationAdd("setup_strategy/multiyear/report.json", json.dumps(result, indent=2, default=str).encode()),
                CommitOperationAdd("setup_strategy/multiyear/trades.parquet", str(LOCAL_DIR / f"{bot}_multiyear_trades.parquet")),
                CommitOperationAdd("setup_strategy/eligibility.json", json.dumps(eligibility, indent=2).encode())]
+        api = HfApi(token=token)
+        if _hf_parts(lambda a: any(f.startswith(f"{PARTS_PATH}/") for f in a.list_repo_files(REPOS[bot], repo_type="model")), 120):
+            ops.append(CommitOperationDelete(f"{PARTS_PATH}/"))
         from server_common import call_with_hard_timeout
-        done = call_with_hard_timeout(lambda: HfApi(token=token).create_commit(
+        done = call_with_hard_timeout(lambda: api.create_commit(
             repo_id=REPOS[bot], repo_type="model", operations=ops,
             commit_message=f"{bot} multi-year setup study {result['computed_at'][:10]}") or True, timeout_sec=900, on_timeout=False)
         if not done:
