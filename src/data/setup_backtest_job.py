@@ -770,8 +770,52 @@ def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades
             "rule": f"setting and symbols chosen on {_lookback_words(lookback_years)}: >= {min_trades} trades, average net > 0"}
 
 
+def _rss_mb() -> float | None:
+    """This process's peak memory (MB), for the study's progress record."""
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
+    except Exception:
+        return None
+
+
+def _parts_dir(bot: str) -> Path:
+    return LOCAL_DIR / f"{bot}_multiyear_parts"
+
+
+def _load_parts(bot: str, key: dict[str, Any]) -> dict[str, pd.DataFrame]:
+    """Symbols this study already replayed (same version and settings, in
+    the last two days): a run that died after its replays resumes at the
+    analysis instead of replaying the whole archive again."""
+    d = _parts_dir(bot)
+    try:
+        saved = json.loads((d / "key.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = None
+    if saved is None or {k: saved.get(k) for k in key} != key or time.time() - float(saved.get("at", 0)) > 2 * 86400:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "key.json").write_text(json.dumps(key | {"at": time.time()}), encoding="utf-8")
+        return {}
+    done = {}
+    for f in d.glob("*.pkl"):
+        try:
+            done[f.stem.replace("__", "/")] = pd.read_pickle(f)
+        except Exception:
+            f.unlink(missing_ok=True)
+    return done
+
+
+def _save_part(bot: str, sym: str, trades: pd.DataFrame) -> None:
+    tmp = _parts_dir(bot) / f"{sym.replace('/', '__')}.pkl.tmp"
+    trades.to_pickle(tmp)
+    tmp.rename(tmp.with_suffix(""))
+
+
 def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, as_completed
 
     import importlib
 
@@ -779,66 +823,104 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     symbols = _study_symbols(bot)
     grid = study_grid(bot)
     started = time.time()
-    frames = []
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
-    if bot in ARCHIVE_STUDY_BOTS:
+    version = STUDY_VERSION.get(bot, 1)
+    parts = _load_parts(bot, {"version": version, "grid": [f"{a}:{b}" for a, b in grid]})
+    parts = {s: t for s, t in parts.items() if s in symbols}
+    progress: dict[str, Any] = {"bot": bot, "done": len(parts), "total": len(symbols), "workers": MULTIYEAR_WORKERS,
+                                "started_at": dt.datetime.fromtimestamp(started, dt.timezone.utc).isoformat(),
+                                "resumed": sorted(parts), "stage": "replaying"}
+
+    def mark(**kw: Any) -> None:
+        progress.update(kw, elapsed_sec=round(time.time() - started), peak_mb=_rss_mb(),
+                        trades_so_far=int(sum(len(f) for f in parts.values())))
+        progress_path.write_text(json.dumps(progress, default=str), encoding="utf-8")
+        logger.info("[setup_backtest] %s study: %s", bot, {k: progress.get(k) for k in ("stage", "done", "elapsed_sec", "peak_mb")})
+
+    mark()
+    todo = [s for s in symbols if s not in parts]
+    if todo and bot in ARCHIVE_STUDY_BOTS:
         # Archives to local disk once, before the workers read them.
         from data import alpaca_news_history
         alpaca_news_history.load()
-        for sym in sorted(set(symbols) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in symbols}):
+        for sym in sorted(set(todo) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in todo}):
             _study_candles(sym)
-        costs = _kalshi_study_costs(bot, symbols)
+        costs = _kalshi_study_costs(bot, todo)
         from data import alpaca_sip_history
         alpaca_sip_history.load("SPY")
-        jobs = {sym: (_multiyear_kalshi_symbol, (bot, sym, grid, costs[sym])) for sym in symbols}
+        jobs = {sym: (_multiyear_kalshi_symbol, (bot, sym, grid, costs[sym])) for sym in todo}
     else:
-        jobs = {sym: (_multiyear_symbol, (sym, cfg["module"], cfg["sides"], grid or [None])) for sym in symbols}
-    from concurrent.futures import as_completed
-    with ProcessPoolExecutor(MULTIYEAR_WORKERS) as pool:
+        jobs = {sym: (_multiyear_symbol, (sym, cfg["module"], cfg["sides"], grid or [None])) for sym in todo}
+    if jobs:
+        pool = ProcessPoolExecutor(MULTIYEAR_WORKERS)
         futures = {pool.submit(fn, args): sym for sym, (fn, args) in jobs.items()}
-        done = 0
         for fut in as_completed(futures):
-            done += 1
+            sym = futures[fut]
             try:
                 t = fut.result()
             except Exception as exc:
-                logger.warning("[setup_backtest] multi-year replay failed for %s: %s", futures[fut], exc)
+                logger.warning("[setup_backtest] multi-year replay failed for %s: %s", sym, exc)
                 t = pd.DataFrame()
-            if not t.empty:
-                frames.append(t)
-            progress_path.write_text(json.dumps({
-                "bot": bot, "done": done, "total": len(symbols), "trades_so_far": int(sum(len(f) for f in frames)),
-                "workers": MULTIYEAR_WORKERS, "started_at": dt.datetime.fromtimestamp(started, dt.timezone.utc).isoformat(),
-                "elapsed_sec": round(time.time() - started), "last_symbol": futures[fut],
-            }), encoding="utf-8")
+            parts[sym] = t
+            _save_part(bot, sym, t)
+            mark(done=len(parts), last_symbol=sym)
+        # Every result is in: never wait on the workers' exit.
+        pool.shutdown(wait=False, cancel_futures=True)
+    mark(stage="analysing")
+    frames = [t for t in parts.values() if not t.empty]
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    result = _analyse_multiyear(bot, trades, symbols=symbols, grid=grid, started=started, mark=mark)
+    mark(stage="writing")
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    if not trades.empty:
+        try:
+            trades.to_parquet(LOCAL_DIR / f"{bot}_multiyear_trades.parquet", index=False)
+        except Exception as exc:  # a mixed-type column must not cost the whole study
+            logger.warning("[setup_backtest] %s trades parquet failed (%s); writing it as text columns", bot, exc)
+            obj = trades.select_dtypes(include="object").columns
+            trades.astype({c: str for c in obj}).to_parquet(LOCAL_DIR / f"{bot}_multiyear_trades.parquet", index=False)
+    (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
+    if publish and not trades.empty:
+        mark(stage="publishing")
+        result["published"] = _publish_multiyear(bot, result)
+        (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
+    import shutil
+    shutil.rmtree(_parts_dir(bot), ignore_errors=True)
+    mark(stage="done")
+    return result
+
+
+def _analyse_multiyear(bot: str, trades: pd.DataFrame, *, symbols: list[str], grid: list, started: float,
+                       mark=lambda **kw: None) -> dict[str, Any]:
+    """Every replayed trade -> the walk-forward record the bot learns from."""
+    import importlib
+
+    cfg = MULTIYEAR[bot]
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
                               "grid": [f"{a}:{b}" for a, b in grid], "universe": symbols, "version": STUDY_VERSION.get(bot, 1),
                               "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
-    if not trades.empty:
-        mod = importlib.import_module(f"data.{cfg['module']}")
-        default_param = f"{mod.STOP_BUFFER_ATR15}:{mod.MIN_RR}"
-        base = trades[trades["param"] == default_param] if "param" in trades and default_param in set(trades["param"]) else trades
-        lookback = int(cfg.get("lookback", ELIGIBILITY_LOOKBACK_YEARS))
-        result["default_param"] = default_param
-        result["lookback_years"] = lookback
-        result["all_trades"] = summarize(base, "net_return")
-        result["walk_forward"] = walk_forward_eligibility(base, lookback_years=lookback)
-        if "param" in trades and trades["param"].nunique() > 1:
-            result["trained"] = walk_forward_trained(trades, default_param=default_param, lookback_years=lookback)
-        if {"hour_block", "weekday"} <= set(trades.columns):
-            result["patterns"] = walk_forward_patterns(trades, default_param=default_param, lookback_years=lookback)
-        if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
-            th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
-            result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
-    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
-    (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
-    if not trades.empty:
-        trades.to_parquet(LOCAL_DIR / f"{bot}_multiyear_trades.parquet", index=False)
-    if publish and not trades.empty:
-        result["published"] = _publish_multiyear(bot, result)
-        (LOCAL_DIR / f"{bot}_multiyear.json").write_text(json.dumps(result, default=str), encoding="utf-8")
+    if trades.empty:
+        return result
+    mod = importlib.import_module(f"data.{cfg['module']}")
+    default_param = f"{mod.STOP_BUFFER_ATR15}:{mod.MIN_RR}"
+    base = trades[trades["param"] == default_param] if "param" in trades and default_param in set(trades["param"]) else trades
+    lookback = int(cfg.get("lookback", ELIGIBILITY_LOOKBACK_YEARS))
+    result["default_param"] = default_param
+    result["lookback_years"] = lookback
+    result["all_trades"] = summarize(base, "net_return")
+    mark(stage="analysing: walk-forward")
+    result["walk_forward"] = walk_forward_eligibility(base, lookback_years=lookback)
+    if "param" in trades and trades["param"].nunique() > 1:
+        mark(stage="analysing: trained settings")
+        result["trained"] = walk_forward_trained(trades, default_param=default_param, lookback_years=lookback)
+    if {"hour_block", "weekday"} <= set(trades.columns):
+        mark(stage="analysing: entry conditions")
+        result["patterns"] = walk_forward_patterns(trades, default_param=default_param, lookback_years=lookback)
+    if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
+        th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
+        result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
+    result["seconds"] = round(time.time() - started)
     return result
 
 
@@ -873,9 +955,13 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
         ops = [CommitOperationAdd("setup_strategy/multiyear/report.json", json.dumps(result, indent=2, default=str).encode()),
                CommitOperationAdd("setup_strategy/multiyear/trades.parquet", str(LOCAL_DIR / f"{bot}_multiyear_trades.parquet")),
                CommitOperationAdd("setup_strategy/eligibility.json", json.dumps(eligibility, indent=2).encode())]
-        HfApi(token=token).create_commit(repo_id=REPOS[bot], repo_type="model", operations=ops,
-                                         commit_message=f"{bot} multi-year setup study {result['computed_at'][:10]}")
-        return True
+        from server_common import call_with_hard_timeout
+        done = call_with_hard_timeout(lambda: HfApi(token=token).create_commit(
+            repo_id=REPOS[bot], repo_type="model", operations=ops,
+            commit_message=f"{bot} multi-year setup study {result['computed_at'][:10]}") or True, timeout_sec=900, on_timeout=False)
+        if not done:
+            logger.warning("[setup_backtest] multi-year publish for %s timed out", bot)
+        return bool(done)
     except Exception as exc:
         logger.warning("[setup_backtest] multi-year publish failed for %s: %s", bot, exc)
         return False
@@ -959,15 +1045,61 @@ def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
     return bool(symbols) and present >= min_fraction * len(symbols)
 
 
+def _pid_alive(pid: int) -> tuple[bool, int | None]:
+    """(running, exit status if this server just reaped it). A study the
+    server launched but never waited on stays a zombie after it exits --
+    that is finished, not running."""
+    try:
+        reaped, status = os.waitpid(pid, os.WNOHANG)
+        if reaped == pid:
+            return False, status
+    except ChildProcessError:
+        pass
+    except OSError:
+        pass
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                return False, None
+    except (OSError, IndexError):
+        pass
+    try:
+        os.kill(pid, 0)
+        return True, None
+    except (ProcessLookupError, PermissionError):
+        return False, None
+
+
+def _write_error(name: str, error: str) -> None:
+    try:
+        LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+        (LOCAL_DIR / f"{name}_error.json").write_text(json.dumps({"at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                                                                  "error": error[-4000:]}), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _running(name: str) -> bool:
     pid_file = LOCAL_DIR / f"{name}.pid"
     if not pid_file.exists():
         return False
     try:
-        os.kill(int(pid_file.read_text()), 0)
-        return True
-    except (ValueError, ProcessLookupError, PermissionError):
+        pid = int(pid_file.read_text())
+    except (ValueError, OSError):
         return False
+    alive, status = _pid_alive(pid)
+    if alive:
+        return True
+    # The study removes its pid file on every normal or failed exit; one
+    # left behind means it was killed (out of memory, a signal).
+    how = (f"killed by signal {os.WTERMSIG(status)}" + (" (out of memory)" if os.WTERMSIG(status) == 9 else "")
+           if status is not None and os.WIFSIGNALED(status) else
+           f"exited with code {os.WEXITSTATUS(status)}" if status is not None else "ended without finishing")
+    err = LOCAL_DIR / f"{name}_error.json"
+    if not err.exists() or err.stat().st_mtime < pid_file.stat().st_mtime:
+        _write_error(name, f"study process {how}; see {name}.log")
+    pid_file.unlink(missing_ok=True)
+    return False
 
 
 def maybe_start_multiyear(bot: str) -> dict[str, Any]:
@@ -1048,7 +1180,20 @@ def multiyear_status(bot: str) -> dict[str, Any]:
                                                                 "test_years", "param_now", "enforce", "years")}
             out["latest"]["trained"]["eligible_now"] = len(tr.get("eligible_now") or [])
     out["running"] = _running(f"{bot}_multiyear")
+    try:
+        out["error"] = json.loads((LOCAL_DIR / f"{bot}_multiyear_error.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        out["error"] = None
     return out
+
+
+def multiyear_log(bot: str, lines: int = 200) -> list[str]:
+    """The last lines the study process wrote (its own log file)."""
+    try:
+        with open(LOCAL_DIR / f"{bot}_multiyear.log", encoding="utf-8", errors="replace") as f:
+            return [line.rstrip("\n") for line in f.readlines()[-max(1, min(int(lines), 2000)):]]
+    except OSError:
+        return []
 
 
 _eligibility_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
@@ -1166,13 +1311,8 @@ def launch(bot: str) -> dict[str, Any]:
     process); one at a time per bot."""
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     pid_file = LOCAL_DIR / f"{bot}.pid"
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text())
-            os.kill(pid, 0)
-            return {"ok": True, "action": "already_running", "pid": pid}
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass
+    if _running(bot):
+        return {"ok": True, "action": "already_running", "pid": int(pid_file.read_text())}
     log = open(LOCAL_DIR / f"{bot}.log", "w")  # noqa: SIM115 -- handed to the child process
     proc = subprocess.Popen([sys.executable, "-m", "data.setup_backtest_job", bot], cwd=str(SRC_DIR), env=dict(os.environ),
                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -1188,12 +1328,16 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     sys.path.insert(0, str(SRC_DIR))
     bot_arg = sys.argv[1]
-    out = run_multiyear(bot_arg.removesuffix("_multiyear")) if bot_arg.endswith("_multiyear") else run(bot_arg)
-    print(json.dumps({k: v for k, v in out.items() if k in ("ok", "bot", "seconds", "published", "error")}))
     try:
-        (LOCAL_DIR / f"{bot_arg}.pid").unlink()
-    except FileNotFoundError:
-        pass
+        (LOCAL_DIR / f"{bot_arg}_error.json").unlink(missing_ok=True)
+        out = run_multiyear(bot_arg.removesuffix("_multiyear")) if bot_arg.endswith("_multiyear") else run(bot_arg)
+        print(json.dumps({k: v for k, v in out.items() if k in ("ok", "bot", "seconds", "published", "error")}))
+    except BaseException:
+        import traceback
+        _write_error(bot_arg, traceback.format_exc())
+        raise
+    finally:
+        (LOCAL_DIR / f"{bot_arg}.pid").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------

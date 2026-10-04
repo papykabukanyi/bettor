@@ -214,3 +214,52 @@ def test_a_published_study_survives_a_restart_on_the_dashboard(monkeypatch, tmp_
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda repo, path, **kw: str(report))
     status = job.multiyear_status("perps")
     assert status["latest"]["computed_at"] == "2026-10-04T00:48:28" and status["latest"]["patterns"]["with_patterns"]["trades"] == 114
+
+
+def test_a_killed_study_is_finished_not_running_and_says_why(monkeypatch):
+    """The server launches a study and never waits on it: when the study's
+    process dies it lingers as a zombie, which must count as finished (it
+    held every later study back) -- with the reason on the dashboard."""
+    (job.LOCAL_DIR / "perps_multiyear.pid").write_text("4242")
+    monkeypatch.setattr(job.os, "waitpid", lambda pid, flags: (pid, 9))  # reaped: killed by SIGKILL
+    assert job._running("perps_multiyear") is False  # noqa: SLF001
+    assert not (job.LOCAL_DIR / "perps_multiyear.pid").exists()
+    assert "killed by signal 9 (out of memory)" in job.multiyear_status("perps")["error"]["error"]
+
+
+def _fake_part(sym: str) -> pd.DataFrame:
+    rows = []
+    for year in range(2023, 2027):
+        ts = int(pd.Timestamp(f"{year}-03-01", tz="UTC").timestamp())
+        rows += [{"symbol": sym, "param": "1.0:2.0", "entry_ts": ts + 3600 * i, "side": "long",
+                  "net_return": 0.004 if i % 3 else -0.002, "hour_block": "h00", "weekday": "mon"} for i in range(12)]
+    return pd.DataFrame(rows)
+
+
+def test_a_study_that_died_after_its_replays_resumes_at_the_analysis(monkeypatch):
+    """Every replayed symbol is saved as it finishes: a rerun replays only
+    what is missing, so a failure in the analysis never costs the hours of
+    replay again."""
+    monkeypatch.setattr(job, "_study_symbols", lambda bot: ["BTC", "ETH"])
+    monkeypatch.setattr(job, "study_grid", lambda bot: [(1.0, 2.0)])
+    grid = ["1.0:2.0"]
+    job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": grid})  # noqa: SLF001
+    for sym in ("BTC", "ETH"):
+        job._save_part("perps", sym, _fake_part(sym))  # noqa: SLF001
+
+    def no_pool(*a, **k):
+        raise AssertionError("nothing left to replay")
+
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", no_pool)
+    result = job.run_multiyear("perps", publish=False)
+    progress = json.loads((job.LOCAL_DIR / "perps_multiyear_progress.json").read_text())
+    assert result["ok"] and result["walk_forward"]["test_years"] == 3 and "patterns" in result
+    assert progress["resumed"] == ["BTC", "ETH"] and progress["stage"] == "done"
+    assert (job.LOCAL_DIR / "perps_multiyear_trades.parquet").exists() and not job._parts_dir("perps").exists()  # noqa: SLF001
+
+
+def test_saved_replays_from_other_settings_are_not_reused():
+    job._load_parts("perps", {"version": 1, "grid": ["1.0:2.0"]})  # noqa: SLF001
+    job._save_part("perps", "BTC", _fake_part("BTC"))  # noqa: SLF001
+    assert set(job._load_parts("perps", {"version": 1, "grid": ["1.0:2.0"]})) == {"BTC"}  # noqa: SLF001
+    assert job._load_parts("perps", {"version": 2, "grid": ["1.0:2.0"]}) == {}  # noqa: SLF001

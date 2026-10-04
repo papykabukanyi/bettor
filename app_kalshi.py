@@ -2434,6 +2434,14 @@ def api_setup_study(bot: str):
     return jsonify({"ok": True, **setup_backtest_job.multiyear_status(bot)})
 
 
+@app.route("/api/setup-study/<bot>/log", methods=["GET"])
+def api_setup_study_log(bot: str):
+    """The last lines the study process wrote (?lines=, default 200)."""
+    if bot not in setup_backtest_job.MULTIYEAR:
+        return jsonify({"ok": False, "error": "unknown bot"}), 404
+    return jsonify({"ok": True, "bot": bot, "lines": setup_backtest_job.multiyear_log(bot, request.args.get("lines", 200, type=int))})
+
+
 @app.route("/api/perps/spot-lead", methods=["GET", "POST"])
 def api_perps_spot_lead():
     """GET: the Coinbase spot-lead predictor -- certification, out-of-sample
