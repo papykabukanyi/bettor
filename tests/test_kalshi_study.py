@@ -151,3 +151,28 @@ def test_the_setting_free_cache_changes_nothing_but_the_work(module_name):
     for a, b in zip(plain, cached):
         pd.testing.assert_frame_equal(a, b)
     assert cache.hits > cache.misses
+
+
+def test_crypto_15m_settles_on_the_minute_mean_and_commodities_on_the_close():
+    from data import kalshi_15m_setup as k
+    assert k.settles_on_minute_average("BTC") and not k.settles_on_minute_average("GOLD")
+    one_min = pd.DataFrame({"ts": [1_790_000_040, 1_790_000_100], "open": [10.0, 20.0], "high": [12.0, 24.0],
+                            "low": [9.0, 18.0], "close": [11.0, 22.0], "volume": [1.0, 1.0]})
+    assert k.price_at(one_min, 1_790_000_100) == 22.0
+    assert k.price_at(one_min, 1_790_000_100, average=True) == pytest.approx(21.0)
+
+
+def test_a_study_of_an_older_version_is_run_again(monkeypatch):
+    launched = []
+    monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
+    monkeypatch.setattr(job, "archive_ready", lambda bot: True)
+    monkeypatch.setattr(job, "eligibility", lambda bot: None)
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    grid = [f"{a}:{b}" for a, b in job.study_grid("kalshi15m")]
+    import json as _json
+    (job.LOCAL_DIR / "kalshi15m_multiyear.json").write_text(_json.dumps({"grid": grid}))  # version 1
+    job.maybe_start_multiyear("kalshi15m")
+    assert launched == ["kalshi15m_multiyear"]
+    launched.clear()
+    (job.LOCAL_DIR / "kalshi15m_multiyear.json").write_text(_json.dumps({"grid": grid, "version": job.STUDY_VERSION["kalshi15m"]}))
+    assert job.maybe_start_multiyear("kalshi15m")["action"] == "already_published" and launched == []

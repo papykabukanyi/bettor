@@ -864,14 +864,32 @@ def live_price(coin: str) -> dict[str, Any] | None:
     return alpaca_stream.latest_price("crypto", pair, max_age_sec=LIVE_PRICE_MAX_AGE_SEC["crypto"])
 
 
-def price_at(one_min: pd.DataFrame, ts: int, *, tolerance_sec: int = 120) -> float | None:
-    """Close of the 1-minute candle ending at or just before ts."""
+def settles_on_minute_average(coin: str) -> bool:
+    """Kalshi's crypto 15m markets settle on the average of the 60 one-second
+    CF Benchmarks index values before close (the strike is the same average
+    before the open); its commodity markets on Pyth's 1-minute candle close.
+    Against 5,172 real crypto windows (Oct 2026) the Alpaca minute's mean
+    (open+high+low+close)/4 matched Kalshi's strike and settlement within a
+    1.21 bp median and called the settled direction 97.3% of the time, vs
+    2.05 bp / 94.4% for the minute's close."""
+    return coin not in METAL_CHART_SYMBOL
+
+
+def minute_value(o: float, h: float, low: float, c: float, *, average: bool) -> float:
+    return (o + h + low + c) / 4.0 if average else c
+
+
+def price_at(one_min: pd.DataFrame, ts: int, *, tolerance_sec: int = 120, average: bool = False) -> float | None:
+    """The 1-minute candle ending at or just before ts: its close, or with
+    average its mean -- the reference Kalshi settles the market on (see
+    settles_on_minute_average)."""
     if one_min is None or one_min.empty:
         return None
     d = one_min[one_min["ts"] <= ts]
     if d.empty or int(d["ts"].iloc[-1]) < ts - tolerance_sec:
         return None
-    return float(d.sort_values("ts")["close"].iloc[-1])
+    r = d.sort_values("ts").iloc[-1]
+    return float(minute_value(r["open"], r["high"], r["low"], r["close"], average=average))
 
 
 def live_setup(coin: str, *, news_score: float | None, now: float | None = None,
@@ -904,7 +922,7 @@ def live_setup(coin: str, *, news_score: float | None, now: float | None = None,
     last_close = float(one_min.sort_values("ts")["close"].iloc[-1])
     rets = np.diff(np.log(one_min.sort_values("ts")["close"].to_numpy(float)[-31:]))
     vol = float(np.std(rets, ddof=1)) if len(rets) > 5 else None
-    strike = price_at(one_min, int(strike_ts)) if strike_ts is not None else None
+    strike = price_at(one_min, int(strike_ts), average=settles_on_minute_average(coin)) if strike_ts is not None else None
     # Fair value is priced off the underlying right now: the stream's live
     # tick when fresh (candles=None means a live read), else the last close.
     tick = None
@@ -986,7 +1004,7 @@ def strategy_card() -> dict[str, Any]:
 def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.DataFrame | None = None,
                    leader_symbol: str | None = None, entry_minutes: tuple[int, ...] = (1, 2, 3, 4, 5),
                    min_seconds_left: int = 600, contracts: int = 10, session: str = SESSION,
-                   leader_session: str | None = None) -> pd.DataFrame:
+                   leader_session: str | None = None, minute_average: bool = True) -> pd.DataFrame:
     """Multi-year study of this bot's contract trading on real charts: every
     15-minute window of `spot_1m` (ts = end) is a contract settling YES if
     the window closes at or above its open. Charts, setups, stop/target hits
@@ -1008,6 +1026,8 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
     ts1 = spot["ts"].to_numpy("int64")
     hi, lo, cl = (spot[k].to_numpy(float) for k in ("high", "low", "close"))
     logc = np.log(cl)
+    # What Kalshi settles on: the minute's mean (crypto) or close (commodities).
+    ref = minute_value(spot["open"].to_numpy(float), hi, lo, cl, average=minute_average)
 
     def bar_at(t: int) -> int | None:
         j = int(np.searchsorted(ts1, t, side="right")) - 1
@@ -1025,7 +1045,7 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
         i_open, i_close = bar_at(open_ts), bar_at(close_ts)
         if i_open is None or i_close is None:
             continue  # no real print at the window's open or close (session gap)
-        strike = cl[i_open]
+        strike = ref[i_open]
         for m in entry_minutes:
             t = open_ts + 60 * m
             if close_ts - t < min_seconds_left:
@@ -1062,7 +1082,7 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
                     exit_value = b if side == "yes" else 1.0 - a
                     how = "stop" if hit_stop else "target"
                     break
-            result = "yes" if cl[i_close] >= strike else "no"
+            result = "yes" if ref[i_close] >= strike else "no"
             cost = price + fee(price)
             pnl = ((1.0 if result == side else 0.0) - cost) if exit_value is None else (exit_value - fee(exit_value) - cost)
             corr = (setup.get("checks") or {}).get("correlation") or {}
@@ -1077,7 +1097,7 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
 def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: pd.DataFrame | None = None,
                      leader_symbol: str | None = None, entry_minutes: tuple[int, ...] = (1, 2, 3, 4, 5),
                      min_seconds_left: int = 600, contracts: int = 10, session: str = SESSION,
-                     leader_session: str | None = None) -> pd.DataFrame:
+                     leader_session: str | None = None, minute_average: bool = True) -> pd.DataFrame:
     """Backtest of this bot's contract trading on real data: `quotes` is one
     coin's per-minute Kalshi archive (kalshi_15m_quotes: ticker, open_ts,
     close_ts, minute, yes_bid, yes_ask, result), `spot_1m` the underlying's
@@ -1106,7 +1126,7 @@ def replay_contracts(quotes: pd.DataFrame, spot_1m: pd.DataFrame, *, leader_1m: 
         i_open = int(np.searchsorted(ts1, open_ts, side="right")) - 1
         if i_open < 0 or ts1[i_open] < open_ts - 120:
             continue
-        strike = cl[i_open]
+        strike = float(minute_value(spot["open"].iat[i_open], hi[i_open], lo[i_open], cl[i_open], average=minute_average))
         for m in entry_minutes:
             t = int(open_ts) + 60 * m
             if close_ts - t < min_seconds_left or m not in wq.index:

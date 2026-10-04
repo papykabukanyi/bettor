@@ -129,6 +129,7 @@ def run_kalshi15m(days: int) -> dict[str, Any]:
                 quotes[quotes.coin == coin], spot[spot.coin == coin][SPOT_COLUMNS],
                 leader_1m=spot[spot.coin == leader][SPOT_COLUMNS] if with_corr else None, leader_symbol=leader,
                 session=kalshi_15m_setup.session_for(coin), leader_session=kalshi_15m_setup.session_for(leader),
+                minute_average=kalshi_15m_setup.settles_on_minute_average(coin),
             )
             if not t.empty:
                 frames.append(t.assign(symbol=coin))
@@ -412,7 +413,8 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
                          session=session, leader_session=lead_session)
         else:
             t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead if not lead.empty else None,
-                                 leader_symbol=lead_sym, session=session, leader_session=lead_session)
+                                 leader_symbol=lead_sym, session=session, leader_session=lead_session,
+                                 minute_average=m.settles_on_minute_average(sym))
         if not t.empty:
             frames.append(_annotate(t, sym, news_idx).assign(symbol=sym, param=f"{setting[0]}:{setting[1]}"))
     cache.__exit__()
@@ -662,7 +664,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
             }), encoding="utf-8")
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     result: dict[str, Any] = {"ok": not trades.empty, "bot": bot, "symbols": len(symbols), "module": cfg["module"],
-                              "grid": [f"{a}:{b}" for a, b in grid], "universe": symbols,
+                              "grid": [f"{a}:{b}" for a, b in grid], "universe": symbols, "version": STUDY_VERSION.get(bot, 1),
                               "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(), "seconds": round(time.time() - started)}
     if not trades.empty:
         mod = importlib.import_module(f"data.{cfg['module']}")
@@ -699,11 +701,12 @@ def _eligibility_from(result: dict[str, Any]) -> dict[str, Any]:
     if pt.get("enforce") and (pt.get("with_patterns", {}).get("avg") or 0) > best_avg:
         return {"enforce": True, "symbols": pt.get("eligible_now", []), "rule": pt.get("rule"), "params": pt.get("param_now"),
                 "blocked": pt.get("blocked_now") or {}, "source": "patterns", "computed_at": result.get("computed_at"),
-                "out_of_sample": pt.get("with_patterns"), "grid": result.get("grid")}
+                "out_of_sample": pt.get("with_patterns"), "grid": result.get("grid"), "version": result.get("version", 1)}
     src = tr if use_trained else wf
     return {"enforce": bool(src.get("enforce")), "symbols": src.get("eligible_now", []), "rule": src.get("rule"),
             "params": tr.get("param_now") if use_trained else None, "blocked": {}, "source": "trained" if use_trained else "walk_forward",
-            "computed_at": result.get("computed_at"), "out_of_sample": src.get("out_of_sample"), "grid": result.get("grid")}
+            "computed_at": result.get("computed_at"), "out_of_sample": src.get("out_of_sample"), "grid": result.get("grid"),
+            "version": result.get("version", 1)}
 
 
 def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
@@ -722,6 +725,11 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
     except Exception as exc:
         logger.warning("[setup_backtest] multi-year publish failed for %s: %s", bot, exc)
         return False
+
+
+# Bumped when a bot's study replay changes in a way that changes results;
+# a published study of an older version is re-run on the next start check.
+STUDY_VERSION = {"kalshi15m": 2}  # 2: settles on Kalshi's reference (minute mean for crypto)
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
@@ -794,16 +802,17 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     the archive is complete, if it has no published study yet and no other
     study is running (one study at a time gets every core)."""
     wanted = [f"{a}:{b}" for a, b in study_grid(bot)]
+    version = STUDY_VERSION.get(bot, 1)
     try:
         # The study's own result file first: it runs in a separate process,
         # so this server's cached eligibility can predate the result.
         local = json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8"))
-        if local.get("grid") == wanted:
+        if local.get("grid") == wanted and local.get("version", 1) == version:
             return {"ok": True, "action": "already_published"}
     except (OSError, ValueError):
         pass
     current = eligibility(bot)
-    if current is not None and current.get("grid") == wanted:
+    if current is not None and current.get("grid") == wanted and current.get("version", 1) == version:
         return {"ok": True, "action": "already_published"}
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
