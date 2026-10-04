@@ -185,3 +185,19 @@ def test_an_enforced_trained_result_sets_the_bots_plan_settings(monkeypatch):
                                                           "params": {"STOP_BUFFER_ATR15": 1.5, "MIN_RR": 3.0}})
     alpaca_strategy.evaluate_setup_candidate("COST")
     assert alpaca_setup.STOP_BUFFER_ATR15 == 1.5 and alpaca_setup.MIN_RR == 3.0
+
+
+def test_a_just_published_study_is_not_launched_again(monkeypatch):
+    """The study runs in its own process: the server's eligibility cache can
+    still hold "nothing published" from before it finished. The fresh result
+    file wins, so the study isn't re-run (which blocked the next bot's)."""
+    import time as _t
+    job._eligibility_cache["perps"] = (_t.time() - 60, None)  # noqa: SLF001 -- cached before the result landed
+    launched = []
+    monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
+    monkeypatch.setattr(job, "archive_ready", lambda bot: True)
+    grid = [f"{a}:{b}" for a, b in job.study_grid("perps")]
+    (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "computed_at": "x"}))
+    assert job.maybe_start_multiyear("perps")["action"] == "already_published" and launched == []
+    assert job.eligibility("perps") is not None  # the newer result file refreshes the cache too
+    job._eligibility_cache.pop("perps", None)  # noqa: SLF001

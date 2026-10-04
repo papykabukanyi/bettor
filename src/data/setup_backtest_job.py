@@ -793,8 +793,17 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     """Checked every few minutes on the Space: launch this bot's study once
     the archive is complete, if it has no published study yet and no other
     study is running (one study at a time gets every core)."""
+    wanted = [f"{a}:{b}" for a, b in study_grid(bot)]
+    try:
+        # The study's own result file first: it runs in a separate process,
+        # so this server's cached eligibility can predate the result.
+        local = json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8"))
+        if local.get("grid") == wanted:
+            return {"ok": True, "action": "already_published"}
+    except (OSError, ValueError):
+        pass
     current = eligibility(bot)
-    if current is not None and current.get("grid") == [f"{a}:{b}" for a, b in study_grid(bot)]:
+    if current is not None and current.get("grid") == wanted:
         return {"ok": True, "action": "already_published"}
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
@@ -839,10 +848,14 @@ _eligibility_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
 def eligibility(bot: str) -> dict[str, Any] | None:
     """The bot's published symbol eligibility (cached an hour), or None."""
     cached = _eligibility_cache.get(bot)
-    if cached and time.time() - cached[0] < 3600:
+    local = LOCAL_DIR / f"{bot}_multiyear.json"
+    try:
+        newer_result = local.stat().st_mtime > (cached[0] if cached else 0.0)
+    except OSError:
+        newer_result = False
+    if cached and time.time() - cached[0] < 3600 and not newer_result:
         return cached[1]
     data = None
-    local = LOCAL_DIR / f"{bot}_multiyear.json"
     try:
         data = _eligibility_from(json.loads(local.read_text(encoding="utf-8")))
     except Exception:
