@@ -133,6 +133,7 @@ from data import (
 # anything -- not just the top-level package object.
 from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
+import server_common
 from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, pull_json_from_hf, save_json, win_rate_stats
 
 PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "1") or "1"))
@@ -169,13 +170,11 @@ KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "1")
 # Space happened to boot, which read each bar 30+ seconds late (perps up
 # to 2 minutes).
 KALSHI_BAR_WAIT_SEC = float(os.getenv("KALSHI_BAR_WAIT_SEC", "6") or "6")
-DECISION_TIMING: dict[str, dict[str, Any]] = {}
+DECISION_TIMING = server_common.DECISION_TIMING  # every bot's, one registry
 
 
 def _on_minute_close(every_minutes: int, *, start: dt.datetime | None = None):
-    from apscheduler.triggers.cron import CronTrigger
-    return CronTrigger(minute="*" if every_minutes <= 1 else f"*/{every_minutes}", second=1, start_date=start,
-                       timezone=dt.timezone.utc)
+    return server_common.minute_close_trigger(every_minutes, start=start)
 
 
 def _await_closed_minute(bot: str) -> dict[str, Any]:
@@ -197,11 +196,7 @@ def _await_closed_minute(bot: str) -> dict[str, Any]:
 
 
 def _note_decision(bot: str, bars: dict[str, Any]) -> None:
-    """How fresh the bot's last decision was: seconds from the minute's
-    close to the decision, and how many of its coins' bars it had."""
-    now = time.time()
-    DECISION_TIMING[bot] = {**bars, "decided_at": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
-                            "after_close_sec": round(now - bars["minute_end"], 1) if bars.get("minute_end") else None}
+    server_common.note_decision(bot, bars)
 # Off-hours-agnostic (crypto trades 24/7, unlike options) -- just a
 # different hour than perps_train (3 ET) and stocks/crypto/options' own
 # daily retrains, so this doesn't contend with any of them for CPU at the
@@ -2446,6 +2441,19 @@ def api_bots_live():
     bots = bot_live_status()
     return jsonify({"ok": True, "now": dt.datetime.now(dt.timezone.utc).isoformat(), "stall_after_sec": BOT_LIVE_STALL_SEC,
                     "live_count": sum(1 for b in bots if b["live"]), "bots": bots, "hf": dict(_HF_HEALTH)})
+
+
+@app.route("/api/strategy-board", methods=["GET"])
+def api_strategy_board():
+    """Every bot on one board: the rule it trades now and the evidence, how
+    fresh its last decision was, and how in step the live Alpaca charts
+    are (the same just-closed minute for every symbol)."""
+    from data import alpaca_stream
+    board = setup_backtest_job.strategy_board()
+    for row in board:
+        row["decision"] = server_common.DECISION_TIMING.get(row["bot"])
+    return jsonify({"ok": True, "now": dt.datetime.now(dt.timezone.utc).isoformat(), "bots": board,
+                    "charts": alpaca_stream.sync_status()})
 
 
 @app.route("/api/correlation/global", methods=["GET"])

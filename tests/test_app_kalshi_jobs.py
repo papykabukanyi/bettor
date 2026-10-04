@@ -2238,3 +2238,13 @@ def test_kalshi_decisions_run_right_after_each_minute_closes():
     assert (nxt.minute, nxt.second) == (31, 1)
     app_kalshi._note_decision("perps", {"have": 3, "of": 3, "waited_sec": 0.8, "minute_end": int(__import__("time").time()) - 2})  # noqa: SLF001
     assert 1.5 <= app_kalshi.DECISION_TIMING["perps"]["after_close_sec"] < 10
+
+
+def test_the_strategy_board_route_lists_every_bot_with_its_decision(monkeypatch):
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "strategy_board", lambda: [{"bot": "perps", "rule": "r"}, {"bot": "kalshi15m", "rule": "r"}])
+    app_kalshi._note_decision("kalshi15m", {"have": 8, "of": 8, "waited_sec": 0.0, "minute_end": int(__import__("time").time())})  # noqa: SLF001
+    with app_kalshi.app.test_client() as client:
+        d = client.get("/api/strategy-board").get_json()
+    assert d["ok"] and [b["bot"] for b in d["bots"]] == ["perps", "kalshi15m"]
+    assert d["bots"][1]["decision"]["have"] == 8 and "charts" in d

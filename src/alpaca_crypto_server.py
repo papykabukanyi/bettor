@@ -81,6 +81,8 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import alpaca_client, alpaca_crypto_data, alpaca_crypto_model, alpaca_crypto_strategy, threads_post
+from data import alpaca_stream
+import server_common
 from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
 
 # Same real, twice-confirmed production bug already fixed on the equities/
@@ -331,7 +333,9 @@ def _run_alpaca_crypto_entry_scan() -> dict[str, Any]:
     equities entry-scan job this session (no hygiene at all there was
     OOM-crashing that service every 15-20 minutes, around the clock)."""
     try:
+        bars = alpaca_stream.wait_for_streams(('crypto',), timeout=server_common.BAR_WAIT_SEC)
         result = alpaca_crypto_strategy.scan_and_enter()
+        server_common.note_decision("crypto", bars)
         save_json(ALPACA_CRYPTO_LATEST_CYCLE_FILE, result)
         return result
     finally:
@@ -765,12 +769,13 @@ def _ensure_background_jobs_started() -> None:
             # The `+ FAST_CHECK_SECONDS // 2` below shifts entry_scan to
             # always land squarely between two
             # fast_check ticks instead.
+            # On the minute's close, like every bot: the same just-closed
+            # bar the Kalshi bots read (server_common.minute_close_trigger).
             scheduler.add_job(
-                _run_alpaca_crypto_entry_scan, "interval", minutes=ALPACA_CRYPTO_CYCLE_MINUTES,
-                id="alpaca_crypto_entry_scan", replace_existing=True, executor="fastcheck",
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-                    seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS + ALPACA_CRYPTO_FAST_CHECK_SECONDS // 2,
-                ),
+                _run_alpaca_crypto_entry_scan, server_common.minute_close_trigger(
+                    ALPACA_CRYPTO_CYCLE_MINUTES, start=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                        seconds=ALPACA_CRYPTO_STARTUP_GRACE_SECONDS), second=2),
+                id="alpaca_crypto_entry_scan", replace_existing=True, executor="fastcheck", misfire_grace_time=20, coalesce=True,
             )
             # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
             # briefly moved to external cron-job.org triggers (see
@@ -1051,6 +1056,7 @@ def _crypto_status_snapshot() -> dict[str, Any]:
             "feature_importances": (meta or {}).get("feature_importances"),
         },
         "latest_cycle": latest_cycle,
+        "decision_timing": server_common.DECISION_TIMING.get("crypto"),
         "latest_position_check": latest_position_check,
         "latest_sweep": latest_sweep,
         "latest_walkforward": latest_walkforward,

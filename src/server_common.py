@@ -625,3 +625,29 @@ def check_rate_limit(client_ip: str, *, max_requests: int = 120, window_sec: flo
             return False
         timestamps.append(now)
         return True
+
+
+# ---------------------------------------------------------------------------
+# Every bot decides on the same just-closed minute: its entry scan runs a
+# second or two after the minute closes, once Alpaca's stream has that
+# minute's bar (bounded wait), and records how fresh the decision was.
+# ---------------------------------------------------------------------------
+DECISION_TIMING: dict[str, dict[str, Any]] = {}
+BAR_WAIT_SEC = float(os.getenv("BAR_WAIT_SEC", os.getenv("KALSHI_BAR_WAIT_SEC", "6")) or "6")
+
+
+def minute_close_trigger(every_minutes: int, *, start: dt.datetime | None = None, second: int = 1):
+    """APScheduler trigger: `second` seconds after every `every_minutes`-th
+    minute closes (UTC)."""
+    from apscheduler.triggers.cron import CronTrigger
+    return CronTrigger(minute="*" if every_minutes <= 1 else f"*/{every_minutes}", second=second, start_date=start,
+                       timezone=dt.timezone.utc)
+
+
+def note_decision(bot: str, bars: dict[str, Any]) -> None:
+    """Seconds from the minute's close to the bot's decision, and how many
+    of its charts' bars for that minute it had."""
+    now = time.time()
+    DECISION_TIMING[bot] = {**bars, "decided_at": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
+                            "after_close_sec": round(now - bars["minute_end"], 1) if bars.get("minute_end") else None}
+

@@ -579,3 +579,14 @@ def test_alpaca_crypto_strategy_reload_job_reports_none_applied_when_nothing_qua
     result = alpaca_crypto_server._run_alpaca_crypto_strategy_reload.__wrapped__()  # noqa: SLF001
 
     assert result == {"ok": True, "applied": None}
+
+
+def test_the_crypto_bot_decides_on_the_closed_minute_like_every_bot(monkeypatch):
+    """Its entry scan runs on the minute's close and records how fresh the
+    decision was, in the registry every bot shares."""
+    import server_common
+    from data import alpaca_crypto_strategy as strat
+    monkeypatch.setattr(strat, "scan_and_enter", lambda: {"opened": []})
+    alpaca_crypto_server._run_alpaca_crypto_entry_scan.__wrapped__()  # noqa: SLF001
+    timing = server_common.DECISION_TIMING["crypto"]
+    assert timing["after_close_sec"] is not None and timing["after_close_sec"] < 61 and "have" in timing

@@ -54,6 +54,8 @@ if str(SRC_DIR) not in sys.path:
 
 from config import et_today
 from data import alpaca_backtest, alpaca_client, alpaca_data, alpaca_model, alpaca_strategy, stock_news, threads_post
+from data import alpaca_stream
+import server_common
 from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, save_json, win_rate_stats
 
 # Real production bug found and fixed on the Schwab side of this same
@@ -372,7 +374,9 @@ def _run_alpaca_entry_scan() -> dict[str, Any]:
     WATCHLIST_TOP_N to 40 and load_training_dataset's max_rows to 5000
     (ranking-only, doesn't need training-grade depth)."""
     try:
+        bars = alpaca_stream.wait_for_streams(('stocks',), timeout=server_common.BAR_WAIT_SEC)
         result = alpaca_strategy.scan_and_enter()
+        server_common.note_decision("stocks", bars)
         save_json(ALPACA_LATEST_CYCLE_FILE, result)
         return result
     finally:
@@ -809,10 +813,12 @@ def _ensure_background_jobs_started() -> None:
             # silently skipped anyway. All of these are themselves fast,
             # bounded operations (seconds, not minutes) sharing this pool
             # safely with fast_check the same way.
+            # On the minute's close, like every bot (server_common.minute_close_trigger).
             scheduler.add_job(
-                _run_alpaca_entry_scan, "interval", minutes=ALPACA_CYCLE_MINUTES,
-                id="alpaca_entry_scan", replace_existing=True, executor="fastcheck",
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_STARTUP_GRACE_SECONDS),
+                _run_alpaca_entry_scan, server_common.minute_close_trigger(
+                    ALPACA_CYCLE_MINUTES, start=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=ALPACA_STARTUP_GRACE_SECONDS),
+                    second=2),
+                id="alpaca_entry_scan", replace_existing=True, executor="fastcheck", misfire_grace_time=60, coalesce=True,
             )
             # Threads content jobs (hourly_status/trending_news/sentiment_snapshot):
             # briefly moved to external cron-job.org triggers (see
@@ -1026,6 +1032,7 @@ def api_alpaca_status():
             "feature_importances": (meta or {}).get("feature_importances"),
         },
         "latest_cycle": latest_cycle,
+        "decision_timing": server_common.DECISION_TIMING.get("stocks"),
         "latest_position_check": latest_position_check,
         "latest_sweep": latest_sweep,
         "latest_walkforward": latest_walkforward,

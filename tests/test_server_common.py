@@ -663,3 +663,11 @@ def test_reload_and_apply_latest_strategy_sweep_never_raises_on_an_unexpected_er
         strategy_module=_FakeStrategyModule(), market="kalshi_15m_metals", token="fake-token",
     )
     assert result is None
+
+
+def test_every_bot_runs_its_decision_on_the_minute_close():
+    import datetime as _dt
+    import server_common
+    trig = server_common.minute_close_trigger(2, second=2)
+    nxt = trig.get_next_fire_time(None, _dt.datetime(2026, 10, 4, 21, 3, 30, tzinfo=_dt.timezone.utc))
+    assert (nxt.minute, nxt.second) == (4, 2)

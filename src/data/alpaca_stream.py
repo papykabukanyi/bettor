@@ -378,5 +378,26 @@ def wait_for_closed_minute(wanted: dict[str, list[str]], *, timeout: float, now:
     return {"have": have, "of": of, "waited_sec": round(time.time() - t0, 2), "minute_end": minute_end}
 
 
+def wait_for_streams(kinds: tuple[str, ...], *, timeout: float, now: float | None = None) -> dict[str, Any]:
+    """wait_for_closed_minute for every symbol the given streams carry."""
+    wanted = {k: list(_streams[k]._subscribed) for k in kinds if k in _streams}  # noqa: SLF001
+    return wait_for_closed_minute(wanted, timeout=timeout, now=now)
+
+
+def sync_status(now: float | None = None) -> dict[str, Any]:
+    """How in step the live charts are: per stream, how many of the
+    symbols trading right now (a bar in the last few minutes) already have
+    the bar of the minute that closed at least 5 seconds ago."""
+    minute_end = int(((now if now is not None else time.time()) - 5) // 60 * 60)
+    out: dict[str, Any] = {}
+    for name, st in _streams.items():
+        with st._lock:  # noqa: SLF001
+            last = {s: max(st._bars.get(s) or {0: None}) for s in st._subscribed}  # noqa: SLF001
+        active = [ts for ts in last.values() if ts >= minute_end - 60 - 180]
+        out[name] = {"minute_end": minute_end, "have": sum(1 for ts in active if ts >= minute_end - 60), "of": len(active),
+                     "subscribed": len(last)}
+    return out
+
+
 def status() -> dict[str, Any]:
     return {name: s.status() for name, s in _streams.items()} or {"streams": "not started"}

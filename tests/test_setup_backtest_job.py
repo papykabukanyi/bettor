@@ -387,3 +387,19 @@ def test_the_live_price_edge_minimum_comes_only_from_a_proven_replay(monkeypatch
     assert job.price_edge_min() is None
     monkeypatch.setattr(job, "latest", lambda bot: {"price_edge": {"enforce": True, "min_edge_now": 0.04}})
     assert job.price_edge_min() == 0.04
+
+
+def test_the_strategy_board_shows_each_bots_rule_and_evidence(monkeypatch):
+    """One board: the rule each bot trades now (the study's choice only when
+    it won on unseen years, else the setup defaults) and its evidence."""
+    learned = {"enforce": True, "source": "trained", "symbols": ["BTC", "ETH"], "blocked": {"weekday": ["sat"]},
+               "params": {"STOP_BUFFER_ATR15": 3.0, "MIN_RR": 2.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 1.0}}
+    monkeypatch.setattr(job, "eligibility", lambda bot: learned if bot == "perps" else None)
+    monkeypatch.setattr(job, "latest", lambda bot: {"ok": True, "days": 120, "with_correlation": {"trades": 19, "avg": 0.1155,
+                                                                                                    "unit": "usd_per_contract"}})
+    board = {r["bot"]: r for r in job.strategy_board()}
+    assert list(board) == ["perps", "kalshi15m", "crypto", "stocks", "options"]
+    assert board["perps"]["rule"] == "stop 3x 15m range · target 2R · hold <= 8 h · break-even at 1R"
+    assert board["perps"]["source"] == "trained" and board["perps"]["blocked"] == {"weekday": ["sat"]}
+    assert board["kalshi15m"]["source"] == "defaults" and board["kalshi15m"]["sides"] == ["long"]
+    assert board["kalshi15m"]["replay"]["trades"] == 19

@@ -136,3 +136,21 @@ def test_the_wait_is_bounded_when_a_bar_never_comes():
     st._handle([{"T": "b", "S": "GLD", "t": iso, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])  # noqa: SLF001
     t0 = _t.time()
     assert st.wait_for_bars(["GLD"], minute_end - 60, timeout=0.5) == (0, 1) and 0.4 < _t.time() - t0 < 2
+
+
+def test_sync_status_counts_the_charts_that_have_the_closed_minute():
+    import datetime as _dt
+    import time as _t
+    st = s.BarStream("crypto", "wss://example/v1beta3/crypto/us-1", lambda: ["BTC/USD", "ETH/USD", "NEAR/USD"])
+    st._subscribed = ["BTC/USD", "ETH/USD", "NEAR/USD"]  # noqa: SLF001
+    now = (int(_t.time()) // 60) * 60 + 30
+    closed = int((now - 5) // 60 * 60) - 60
+    iso = lambda ts: _dt.datetime.fromtimestamp(ts, _dt.timezone.utc).isoformat()  # noqa: E731
+    st._handle([{"T": "b", "S": "BTC/USD", "t": iso(closed), "o": 1, "h": 1, "l": 1, "c": 1, "v": 1},  # noqa: SLF001
+                {"T": "b", "S": "ETH/USD", "t": iso(closed - 60), "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])
+    s._streams["crypto_test"] = st  # noqa: SLF001
+    try:
+        sync = s.sync_status(now=now)["crypto_test"]
+    finally:
+        s._streams.pop("crypto_test", None)  # noqa: SLF001
+    assert (sync["have"], sync["of"], sync["subscribed"]) == (1, 2, 3)  # NEAR isn't trading: not counted

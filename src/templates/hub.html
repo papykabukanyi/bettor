@@ -109,6 +109,7 @@
   .corr-table th, .corr-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   .corr-table th { color: var(--muted); font-weight: 600; }
   .corr-scroll { overflow-x: auto; }
+  .corr-table td .pos { color: var(--green); } .corr-table td .neg { color: var(--red); }
 </style>
 </head>
 <body>
@@ -193,6 +194,12 @@
   </div>
 </div>
 
+<div class="section-label">&#127919; Strategy Board <span class="line"></span> <span id="board-sync" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
+<div class="corr-wrap">
+  <div class="corr-scroll"><table class="corr-table"><thead><tr><th>Bot</th><th>Trades now</th><th>Unseen years</th><th>Recent real data</th><th>Decision</th></tr></thead>
+    <tbody id="board-rows"><tr><td colspan="5" style="color:var(--muted)">Loading&hellip;</td></tr></tbody></table></div>
+</div>
+
 <div class="section-label">&#128279; Global Correlation <span class="line"></span> <span id="corr-when" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
 <div class="corr-wrap">
   <div class="corr-leaders" id="corr-leaders"><span class="corr-chip">Loading&hellip;</span></div>
@@ -232,6 +239,36 @@
       card.querySelector('[data-stat="winrate"]').textContent = wr != null ? fmtPct(wr) : "--";
     }).catch(() => {});
   });
+
+  // Strategy board: each bot's rule in force, its evidence, decision freshness.
+  const BOARD_NAME = { perps: "Perps", kalshi15m: "15-Min", crypto: "Crypto", stocks: "Stocks", options: "Options" };
+  const boardEsc = (v) => String(v ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  function boardAvg(x, unit) {
+    if (x == null || isNaN(x)) return "--";
+    return unit === "usd_per_contract" ? `${(x * 100).toFixed(1)}&cent;` : `${(x * 100).toFixed(2)}%`;
+  }
+  async function refreshBoard() {
+    let d;
+    try { d = await (await fetch("/api/strategy-board", { cache: "no-store" })).json(); } catch (e) { return; }
+    if (!d || !d.ok) return;
+    const ch = d.charts || {};
+    document.getElementById("board-sync").textContent = Object.entries(ch).map(([k, v]) =>
+      `${k} ${v.have}/${v.of} at ${new Date(v.minute_end * 1000).toISOString().slice(11, 16)}`).join(" · ") + " UTC";
+    document.getElementById("board-rows").innerHTML = (d.bots || []).map(b => {
+      const st = b.study || {}, u = st.unseen || {}, rp = b.replay || {}, dc = b.decision || {};
+      const sides = b.sides && b.sides.length === 1 ? ` · ${b.bot === "kalshi15m" ? (b.sides[0] === "long" ? "YES only" : "NO only") : b.sides[0] + " only"}` : "";
+      const edge = b.min_price_edge != null ? ` · price edge &ge; ${(b.min_price_edge * 100).toFixed(0)}&cent;` : "";
+      const blocked = Object.entries(b.blocked || {}).map(([f, v]) => `${f}&ne;${v.join("/")}`).join(", ");
+      const trades = `${boardEsc(b.rule)}${sides}${edge}<br><span style="color:var(--muted)">${b.source === "defaults" ? "setup defaults" : "learned (" + boardEsc(b.source) + ")"}${Array.isArray(b.symbols) ? " · " + b.symbols.length + " symbols" : ""}${blocked ? " · skips " + boardEsc(blocked) : ""}</span>`;
+      const study = st.running ? `running ${(st.progress || {}).done ?? 0}/${(st.progress || {}).total ?? "?"}`
+        : st.error ? `<span class="neg">failed</span>` : u.trades ? `<span class="${u.avg > 0 ? "pos" : "neg"}">${boardAvg(u.avg, "return")}/tr</span> · ${u.trades} tr · ${st.positive_years ?? 0}/${st.test_years ?? 0} yrs up` : "--";
+      const replay = rp.trades ? `<span class="${rp.avg > 0 ? "pos" : "neg"}">${boardAvg(rp.avg, rp.unit)}/tr</span> · ${rp.trades} tr · ${rp.days}d` : (rp.ok === false ? "failed" : "--");
+      const dec = dc.after_close_sec != null ? `${dc.after_close_sec}s after close · ${dc.have}/${dc.of} bars` : "--";
+      return `<tr><td><strong>${BOARD_NAME[b.bot] || b.bot}</strong></td><td>${trades}</td><td>${study}</td><td>${replay}</td><td>${dec}</td></tr>`;
+    }).join("");
+  }
+  refreshBoard();
+  setInterval(refreshBoard, 30000);
 
   // LIVE only when the bot's running code has real-order trading on AND its
   // trading loop completed a run in the last 10 minutes -- one shared

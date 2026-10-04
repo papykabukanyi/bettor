@@ -209,6 +209,57 @@ def price_edge_study(trades: pd.DataFrame, *, min_train_trades: int = 10, min_tr
             "rule": "enter only when fair value - ask >= the threshold chosen on the weeks before (unseen week scored)"}
 
 
+def _rule_words(bot: str, params: dict[str, Any]) -> str:
+    """A bot's plan setting in a few words."""
+    out = []
+    if params.get("STOP_BUFFER_ATR15") is not None:
+        out.append(f"stop {params['STOP_BUFFER_ATR15']:g}x 15m range")
+    if params.get("MIN_RR") is not None:
+        out.append(f"target {params['MIN_RR']:g}R")
+    if params.get("MAX_HOLD_HOURS") is not None:
+        out.append(f"hold <= {params['MAX_HOLD_HOURS']:g} h")
+    if params.get("BREAKEVEN_R"):
+        out.append(f"break-even at {params['BREAKEVEN_R']:g}R")
+    return " · ".join(out)
+
+
+def strategy_board() -> list[dict[str, Any]]:
+    """What each bot trades right now and the evidence behind it: the rule
+    in force (the study's choice when it won on unseen data, else the
+    setup's defaults), its multi-year study on unseen years, and its
+    replay on recent real data."""
+    board = []
+    for bot in STUDY_PRIORITY:
+        elig = eligibility(bot) or {}
+        enforce = bool(elig.get("enforce"))
+        params = dict(elig.get("params") or {}) if enforce else {}
+        if not params:
+            params = _param_values(default_param(bot))
+        row: dict[str, Any] = {"bot": bot, "source": elig.get("source") if enforce else "defaults", "rule": _rule_words(bot, params),
+                               "params": params, "symbols": elig.get("symbols") if enforce else "all",
+                               "blocked": (elig.get("blocked") or {}) if enforce else {}}
+        if bot == "kalshi15m":
+            from data import kalshi_15m_setup
+            row["sides"] = list(kalshi_15m_setup.SIDES)
+            row["min_price_edge"] = price_edge_min()
+        elif bot in MULTIYEAR:
+            row["sides"] = list(MULTIYEAR[bot]["sides"])
+        st = multiyear_status(bot) if bot in MULTIYEAR else {}
+        latest_study = st.get("latest") or {}
+        best = ((latest_study.get("patterns") or {}).get("with_patterns") or (latest_study.get("trained") or {}).get("out_of_sample")
+                or (latest_study.get("walk_forward") or {}).get("out_of_sample") or {})
+        yrs = latest_study.get("patterns") or latest_study.get("trained") or latest_study.get("walk_forward") or {}
+        row["study"] = {"computed_at": latest_study.get("computed_at"), "unseen": best, "positive_years": yrs.get("positive_years"),
+                        "test_years": yrs.get("test_years"), "in_force": enforce, "running": bool(st.get("running")),
+                        "progress": st.get("progress") if st.get("running") else None, "error": st.get("error")}
+        rp = latest(bot) or {}
+        wc = rp.get("with_correlation") or {}
+        row["replay"] = {"computed_at": rp.get("computed_at"), "days": rp.get("days"), "trades": wc.get("trades"),
+                         "avg": wc.get("avg"), "unit": wc.get("unit"), "profit_factor": wc.get("profit_factor"), "ok": rp.get("ok")}
+        board.append(row)
+    return board
+
+
 def price_edge_min() -> float | None:
     """The live 15m bot's minimum price edge: the replay's chosen threshold
     while the walk-forward proves it, else None (no price filter)."""
