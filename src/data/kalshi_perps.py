@@ -37,6 +37,12 @@ Endpoints (confirmed live against the real account, 2026-07):
     GET  /margin/orders                 -> list orders (filter by ticker/status)
     POST /margin/orders                 -> create order (ticker, side, count, price, ...)
     DELETE /margin/orders/{order_id}    -> cancel order
+    PUT/GET/DELETE /margin/cross/positions/{ticker}/exit_trigger
+                                        -> exchange-side stop-loss / take-profit
+                                            bracket on a position (mark price,
+                                            reduce-only orders when it fires)
+    GET  /margin/fills                  -> the account's fills (price, count,
+                                            fees, realized_pnl, created_time)
 """
 from __future__ import annotations
 
@@ -221,3 +227,51 @@ def run_connectivity_check() -> dict[str, Any]:
     _run("margin_positions", get_margin_positions)
     _run("margin_markets", list_margin_markets)
     return result
+
+
+def _fixed_dollars(price: float) -> str:
+    return f"{float(price):.4f}"
+
+
+def set_cross_exit_bracket(ticker: str, *, stop_loss_price: float, take_profit_price: float,
+                           subaccount: int | None = None) -> dict[str, Any]:
+    """A stop-loss / take-profit bracket on the whole position: Kalshi
+    watches the mark price and fires a reduce-only order at either level
+    (docs.kalshi.com/margin-rest/exit-triggers/set-cross-exit-trigger)."""
+    params = {"subaccount": int(subaccount)} if subaccount is not None else None
+    payload = {"kind": "bracket", "stop_loss_price": _fixed_dollars(stop_loss_price),
+               "take_profit_price": _fixed_dollars(take_profit_price)}
+    return _request_json("PUT", f"/margin/cross/positions/{ticker}/exit_trigger", params=params, payload=payload, auth=True)
+
+
+def get_cross_exit_triggers(ticker: str, *, subaccount: int | None = None) -> list[dict[str, Any]]:
+    params = {"subaccount": int(subaccount)} if subaccount is not None else None
+    data = _request_json("GET", f"/margin/cross/positions/{ticker}/exit_trigger", params=params, auth=True)
+    triggers = data.get("exit_triggers")
+    return triggers if isinstance(triggers, list) else []
+
+
+def cancel_cross_exit_triggers(ticker: str, *, subaccount: int | None = None) -> None:
+    """Cancel every exit trigger on the position (204, no body; succeeds
+    when nothing is live)."""
+    params = {"subaccount": int(subaccount)} if subaccount is not None else None
+    try:
+        _request_json("DELETE", f"/margin/cross/positions/{ticker}/exit_trigger", params=params, auth=True)
+    except ValueError:
+        pass  # 204 No Content: nothing to parse
+
+
+def get_margin_fills(*, min_ts: int | None = None, max_pages: int = 5) -> list[dict[str, Any]]:
+    """The account's margin fills since min_ts (newest pages first)."""
+    fills: list[dict[str, Any]] = []
+    params: dict[str, Any] = {"limit": 200}
+    if min_ts is not None:
+        params["min_ts"] = int(min_ts)
+    for _ in range(max_pages):
+        data = _request_json("GET", "/margin/fills", params=params, auth=True)
+        fills += data.get("fills") or []
+        cursor = data.get("cursor")
+        if not cursor:
+            break
+        params["cursor"] = cursor
+    return fills

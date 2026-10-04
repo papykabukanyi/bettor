@@ -4229,3 +4229,76 @@ def test_setup_entry_skips_a_condition_the_study_found_losing(monkeypatch, setup
     assert c["should_enter"] is False and f"hour_block={hour_block}" in c["reason"]
     monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["ETH"], "rule": "r"})
     assert "not eligible" in strat.evaluate_candidate("KXBTCPERP")["reason"]
+
+
+# ---- exchange-side brackets (Kalshi exit triggers) ----
+
+def _bracket_position(**kw):
+    p = {"ticker": "KXBTCPERP", "side": "long", "entry_price": 6.60, "count": 3.0, "dry_run": False,
+         "opened_at": (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)).isoformat(),
+         "setup_stop_price": 6.53456, "setup_target_price": 7.26012, "entry_system": "setup", "setup_id": "s1"}
+    p.update(kw)
+    return p
+
+
+def test_a_live_setup_entry_gets_its_plan_as_an_exchange_bracket(monkeypatch):
+    calls = []
+    monkeypatch.setattr(strat, "cancel_cross_exit_triggers", lambda ticker: calls.append(("cancel", ticker)))
+    monkeypatch.setattr(strat, "set_cross_exit_bracket", lambda ticker, *, stop_loss_price, take_profit_price:
+                        calls.append(("set", ticker, stop_loss_price, take_profit_price)) or {"id": "t1", "status": "active"})
+    pos = _bracket_position()
+    strat._attach_exchange_bracket(pos, 0.0001)  # noqa: SLF001
+    assert calls == [("cancel", "KXBTCPERP"), ("set", "KXBTCPERP", pytest.approx(6.5346), pytest.approx(7.2601))]
+    assert pos["exchange_bracket"]["id"] == "t1" and pos["exchange_bracket"]["status"] == "active"
+    calls.clear()
+    strat._attach_exchange_bracket(_bracket_position(dry_run=True), 0.0001)  # noqa: SLF001
+    strat._attach_exchange_bracket(_bracket_position(setup_stop_price=None), 0.0001)  # noqa: SLF001
+    assert calls == []  # dry-run and plan-less positions never touch the exchange
+
+
+def test_a_failed_bracket_is_recorded_and_never_blocks_the_position(monkeypatch):
+    monkeypatch.setattr(strat, "cancel_cross_exit_triggers", lambda ticker: None)
+    monkeypatch.setattr(strat, "set_cross_exit_bracket", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("Kalshi API error 400")))
+    pos = _bracket_position()
+    strat._attach_exchange_bracket(pos, 0.0001)  # noqa: SLF001
+    assert "400" in pos["exchange_bracket"]["error"]
+
+
+def test_a_position_the_exchange_closed_is_recorded_from_its_fills(monkeypatch):
+    pos = _bracket_position()
+    later = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5)).isoformat()
+    earlier = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=3)).isoformat()
+    monkeypatch.setattr(strat, "get_margin_fills", lambda min_ts=None: [
+        {"ticker": "KXBTCPERP", "side": "ask", "count": "2.00", "price": "6.5346", "created_time": later},
+        {"ticker": "KXBTCPERP", "side": "ask", "count": "1.00", "price": "6.5340", "created_time": later},
+        {"ticker": "KXBTCPERP", "side": "bid", "count": "3.00", "price": "6.6000", "created_time": later},   # the entry side
+        {"ticker": "KXETHPERP", "side": "ask", "count": "5.00", "price": "2.6800", "created_time": later},   # another perp
+        {"ticker": "KXBTCPERP", "side": "ask", "count": "4.00", "price": "6.9000", "created_time": earlier},  # before it opened
+    ])
+    monkeypatch.setattr(strat, "get_cross_exit_triggers", lambda ticker: [
+        {"status": "filled", "triggered_leg": "stop_loss", "updated_time": later}])
+    monkeypatch.setattr(strat, "_real_open_positions_by_ticker", lambda: {})
+    state = {"positions": [pos], "trade_log": [], "realized_pnl_by_date": {}}
+    assert strat._reconcile_positions_with_exchange(state) == []  # noqa: SLF001
+    (trade,) = state["trade_log"]
+    assert trade["count"] == 3.0 and trade["exit_price"] == pytest.approx((2 * 6.5346 + 6.5340) / 3)
+    assert trade["reason"].startswith("exchange_stop_loss (setup invalidation") and trade["exit_fill_type"] == "exchange"
+    assert trade["realized_pnl_usd"] < 0 and trade["setup_id"] == "s1"
+    assert sum(state["realized_pnl_by_date"].values()) == pytest.approx(trade["realized_pnl_usd"])
+
+
+def test_an_entry_that_never_filled_is_still_dropped_without_a_trade(monkeypatch):
+    monkeypatch.setattr(strat, "get_margin_fills", lambda min_ts=None: [])
+    monkeypatch.setattr(strat, "_real_open_positions_by_ticker", lambda: {})
+    state = {"positions": [_bracket_position()], "trade_log": [], "realized_pnl_by_date": {}}
+    assert strat._reconcile_positions_with_exchange(state) == [] and state["trade_log"] == []  # noqa: SLF001
+
+
+def test_a_learned_volatility_condition_is_read_from_the_live_chart(monkeypatch, setup_mode):
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["BTC"], "rule": "r",
+                                                                         "blocked": {"vol_regime": ["high"]}, "vol_thresholds": {"BTC": [0.1, 0.2]}})
+    monkeypatch.setattr(setup_backtest_job, "vol_regime_now", lambda candles, thresholds, session: "high")
+    monkeypatch.setattr(strat.perps_setup, "chart_candles", lambda ticker: "live chart")
+    c = strat.evaluate_candidate("KXBTCPERP")
+    assert c["should_enter"] is False and "vol_regime=high" in c["reason"] and c["entry_conditions"]["vol_regime"] == "high"

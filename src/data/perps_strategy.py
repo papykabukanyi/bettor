@@ -84,8 +84,9 @@ from typing import Any
 from data import crypto_correlation
 from data.crypto_prices import get_fast_price
 from data.kalshi_perps import (
-    cancel_margin_order, create_margin_order, get_margin_balance, get_margin_fee_tiers, get_margin_market,
-    get_margin_order, get_margin_positions,
+    cancel_margin_order, create_margin_order, get_cross_exit_triggers, get_margin_balance, get_margin_fee_tiers,
+    get_margin_fills, get_margin_market, get_margin_order, get_margin_positions, set_cross_exit_bracket,
+    cancel_cross_exit_triggers,
 )
 from data.crypto_news import get_sentiment, prewarm_sentiment
 from data.perps_data import chartable_tickers, coin_for_ticker, fetch_candle_frames, get_watchlist, latest_feature_row
@@ -1338,9 +1339,16 @@ def _evaluate_candidate_setup(ticker: str, *, traded_setup_ids: frozenset[str] =
         result.update(should_enter=False, reason=f"{setup['setup']} {setup['side']} already traded ({setup['setup_id']})")
         return result
     corr = (setup.get("checks") or {}).get("correlation") or {}
+    regime = "n/a"
+    thresholds = ((elig or {}).get("vol_thresholds") or {}).get(coin)
+    if thresholds:
+        try:
+            regime = setup_backtest_job.vol_regime_now(perps_setup.chart_candles(ticker), thresholds, perps_setup.chart_session(coin))
+        except Exception as exc:
+            logger.debug("[perps_strategy] volatility regime unavailable for %s: %s", ticker, exc)
     result["entry_conditions"] = setup_backtest_job.pattern_features(
         ts=int(time.time()), side=setup["side"], news_count=news_count, news_score=news,
-        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"))
+        leader_corr=corr.get("corr"), leader_dir=corr.get("leader_dir"), vol_regime=regime)
     blocked = setup_backtest_job.blocked_reason(elig.get("blocked") if enforce else None, result["entry_conditions"])
     if blocked:
         result.update(should_enter=False, reason=f"{setup['setup']} {setup['side']}: skipped, the study found this condition loses ({blocked})")
@@ -2377,6 +2385,158 @@ def _real_open_positions_by_ticker() -> dict[str, dict[str, Any]] | None:
     return result
 
 
+def _trade_record(
+    position: dict[str, Any], *, ticker: str, side: str, entry_price: float, exit_price: float, closed_count: float,
+    count: float, gross_pnl: float, fee_usd: float, realized_pnl: float, reason: str, dry_run: bool,
+    exit_fill_type: str, opened_at: str | None, hold_minutes: float | None,
+) -> dict[str, Any]:
+    """One closed trade as the trade log stores it: the exit, its P&L, and
+    the position's entry-time context. Shared by the bot's own exits and
+    positions Kalshi closed (an exchange bracket or a manual close)."""
+    effective_dry_run = dry_run
+    return {
+        "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
+        "count": closed_count, "gross_pnl_usd": gross_pnl, "fee_usd": fee_usd,
+        "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
+        "entry_fill_type": position.get("entry_fill_type", "taker_fallback"), "exit_fill_type": exit_fill_type,
+        "opened_at": opened_at, "hold_minutes": hold_minutes,
+        # Entry-time model/technical context (see scan_and_enter) --
+        # what the model/filters actually saw at decision time, so a
+        # post-trade analysis can ask "what led to this win/loss"
+        # instead of only ever knowing how it ended.
+        "entry_probability_up": position.get("entry_probability_up"),
+        "entry_spot_lead_pred_bps": position.get("entry_spot_lead_pred_bps"),
+        "entry_model_direction": position.get("entry_model_direction"),
+        "entry_score": position.get("entry_score"),
+        "entry_trend_pct": position.get("entry_trend_pct"),
+        "entry_volatility_30": position.get("entry_volatility_30"),
+        "entry_reason": position.get("entry_reason"),
+        "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
+        "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
+        "entry_bb_pct_b": position.get("entry_bb_pct_b"),
+        "entry_rsi_14": position.get("entry_rsi_14"),
+        "entry_sentiment_score": position.get("entry_sentiment_score"),
+        "entry_correlation_score": position.get("entry_correlation_score"),
+        "entry_correlation_reason": position.get("entry_correlation_reason"),
+        "entry_scale_in_enabled": position.get("entry_scale_in_enabled"),
+        "entry_partial_exit_enabled": position.get("entry_partial_exit_enabled"),
+        "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
+        "entry_system": position.get("entry_system", "legacy"), "setup_id": position.get("setup_id"),
+        "setup_kind": position.get("setup_kind"), "setup_stop_price": position.get("setup_stop_price"),
+        "setup_target_price": position.get("setup_target_price"), "setup_rr_net": position.get("setup_rr_net"),
+        # "partial" (see USE_PARTIAL_EXIT) marks a real,
+        # informational P&L event on a position that's still
+        # open -- NOT a resolved win/loss. win_rate_stats/
+        # _maybe_run_batch_trade_analysis/perps_report's
+        # _trade_stats all filter on this so one position's
+        # lifecycle can't get double-counted as multiple
+        # independent trades. Derived from the SAME comparison
+        # the remainder-keeping block below already makes (not
+        # from the reason string) so both a deliberate partial
+        # take-profit AND an accidental IOC partial fill get
+        # tagged identically and correctly.
+        "exit_kind": "partial" if closed_count < count else "full",
+        # Only meaningful when exit_kind == "partial" -- how much
+        # of the position is still open afterward (see the
+        # remainder block below, same round(count - closed_count)
+        # math), for the distinct partial-exit Threads post.
+        "remaining_count": round(count - closed_count, 6) if closed_count < count else None,
+    }
+
+
+# The setup plan's stop and target also live on Kalshi as an exchange-side
+# bracket (user decision 2026-10-04): Kalshi watches the perp's mark price
+# and fires a reduce-only order at either level, so a position is closed at
+# its plan even while this process restarts. The bot's own exit check stays
+# as a second layer; a position Kalshi closed is recorded from its fills.
+EXCHANGE_BRACKETS = _env_flag("PERPS_EXCHANGE_BRACKETS", True)
+
+
+def _attach_exchange_bracket(position: dict[str, Any], tick_size: float) -> None:
+    """Put the position's planned stop/target on Kalshi (whole position).
+    A failure is recorded on the position, never raised -- the bot's own
+    exit check still covers it."""
+    stop, target = position.get("setup_stop_price"), position.get("setup_target_price")
+    if not EXCHANGE_BRACKETS or position.get("dry_run") or stop is None or target is None:
+        return
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    stop_px, target_px = _round_price(float(stop), tick_size), _round_price(float(target), tick_size)
+    try:
+        cancel_cross_exit_triggers(position["ticker"])  # one bracket per position: replace any earlier one
+        r = set_cross_exit_bracket(position["ticker"], stop_loss_price=stop_px, take_profit_price=target_px)
+        position["exchange_bracket"] = {"id": r.get("id"), "status": r.get("status"), "stop": stop_px, "target": target_px, "set_at": now}
+    except Exception as exc:
+        logger.warning("[perps_strategy] exchange bracket for %s failed: %s", position.get("ticker"), exc)
+        position["exchange_bracket"] = {"error": str(exc)[:200], "stop": stop_px, "target": target_px, "at": now}
+
+
+def _exchange_close_reason(ticker: str, position: dict[str, Any]) -> str:
+    """Why Kalshi closed the position: the bracket leg that fired, else a
+    close made outside this bot."""
+    try:
+        fired = [t for t in get_cross_exit_triggers(ticker) if t.get("status") == "filled" and t.get("triggered_leg")]
+    except Exception:
+        fired = []
+    if fired:
+        leg = sorted(fired, key=lambda t: str(t.get("updated_time") or ""))[-1]["triggered_leg"]
+        level = position.get("setup_stop_price") if leg == "stop_loss" else position.get("setup_target_price")
+        what = "setup invalidation" if leg == "stop_loss" else "setup target"
+        return f"exchange_{leg} ({what} {float(level):.6g})" if level is not None else f"exchange_{leg}"
+    return "closed_on_exchange"
+
+
+def _record_exchange_close(state: dict[str, Any], position: dict[str, Any]) -> dict[str, Any] | None:
+    """A real position that is no longer on Kalshi: if Kalshi's fills show it
+    was closed after it opened (an exchange bracket, or a close made in the
+    app), record the trade from those fills; None when nothing closed it
+    (an entry that never filled -- nothing to record)."""
+    if position.get("dry_run"):
+        return None
+    ticker, side = position["ticker"], position.get("side", "long")
+    try:
+        opened = dt.datetime.fromisoformat(str(position["opened_at"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    try:
+        fills = get_margin_fills(min_ts=int(opened.timestamp()) - 5)
+    except Exception as exc:
+        logger.warning("[perps_strategy] fills lookup for %s failed: %s", ticker, exc)
+        return None
+    closing_side = "ask" if side == "long" else "bid"
+
+    def after_open(f: dict[str, Any]) -> bool:
+        try:
+            return dt.datetime.fromisoformat(str(f.get("created_time")).replace("Z", "+00:00")) >= opened
+        except (TypeError, ValueError):
+            return False
+
+    closing = [f for f in fills if f.get("ticker") == ticker and f.get("side") == closing_side and after_open(f)]
+    count = sum(float(f.get("count") or 0) for f in closing)
+    if count <= 0:
+        return None
+    exit_price = sum(float(f.get("price") or 0) * float(f.get("count") or 0) for f in closing) / count
+    entry_price = float(position["entry_price"])
+    gross = round(((exit_price - entry_price) if side == "long" else (entry_price - exit_price)) * count, 6)
+    fee_usd = round_trip_fee_usd(ticker, entry_price, exit_price, count,
+                                 entry_is_maker=position.get("entry_fill_type") == "maker", exit_is_maker=False)
+    realized = round(gross - fee_usd, 6)
+    hold = round((dt.datetime.now(dt.timezone.utc) - opened).total_seconds() / 60.0, 2)
+    trade = _trade_record(position, ticker=ticker, side=side, entry_price=entry_price, exit_price=round(exit_price, 6),
+                          closed_count=min(count, float(position.get("count") or count)), count=float(position.get("count") or count),
+                          gross_pnl=gross, fee_usd=fee_usd, realized_pnl=realized,
+                          reason=_exchange_close_reason(ticker, position), dry_run=False,
+                          exit_fill_type="exchange", opened_at=position.get("opened_at"), hold_minutes=hold)
+    by_date = state.setdefault("realized_pnl_by_date", {})
+    by_date[_today_str()] = round(float(by_date.get(_today_str(), 0.0)) + realized, 6)
+    trade_log = state.setdefault("trade_log", [])
+    trade_log.append(trade)
+    if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
+        del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
+    logger.info("[perps_strategy] recorded exchange close for %s: %s, P&L %.4f", ticker, trade["reason"], realized)
+    return trade
+
+
 def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Make local `state["positions"]` match what Kalshi's own account
     actually holds before any exit/entry decision is made. Handles all
@@ -2436,7 +2596,10 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         reconciled.append(local)
 
     for ticker in set(local_by_ticker) - set(real):
-        logger.warning("[perps_strategy] dropping phantom local position (no matching real fill): %s", ticker)
+        # Closed on Kalshi (its bracket, or a close in the app): record the
+        # trade from the real fills. Otherwise the entry never filled.
+        if _record_exchange_close(state, local_by_ticker[ticker]) is None:
+            logger.warning("[perps_strategy] dropping phantom local position (no matching real fill): %s", ticker)
 
     return reconciled
 
@@ -2828,55 +2991,12 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         hold_minutes = round((dt.datetime.now(dt.timezone.utc) - opened_dt).total_seconds() / 60.0, 2)
                     except Exception:
                         pass
-                trade = {
-                    "closed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "ticker": ticker, "side": side, "entry_price": entry_price, "exit_price": exit_price,
-                    "count": closed_count, "gross_pnl_usd": gross_pnl, "fee_usd": fee_usd,
-                    "realized_pnl_usd": realized_pnl, "reason": reason, "dry_run": effective_dry_run,
-                    "entry_fill_type": position.get("entry_fill_type", "taker_fallback"), "exit_fill_type": exit_fill_type,
-                    "opened_at": opened_at, "hold_minutes": hold_minutes,
-                    # Entry-time model/technical context (see scan_and_enter) --
-                    # what the model/filters actually saw at decision time, so a
-                    # post-trade analysis can ask "what led to this win/loss"
-                    # instead of only ever knowing how it ended.
-                    "entry_probability_up": position.get("entry_probability_up"),
-                    "entry_spot_lead_pred_bps": position.get("entry_spot_lead_pred_bps"),
-                    "entry_model_direction": position.get("entry_model_direction"),
-                    "entry_score": position.get("entry_score"),
-                    "entry_trend_pct": position.get("entry_trend_pct"),
-                    "entry_volatility_30": position.get("entry_volatility_30"),
-                    "entry_reason": position.get("entry_reason"),
-                    "entry_dollar_volume_z": position.get("entry_dollar_volume_z"),
-                    "entry_macd_hist_pct": position.get("entry_macd_hist_pct"),
-                    "entry_bb_pct_b": position.get("entry_bb_pct_b"),
-                    "entry_rsi_14": position.get("entry_rsi_14"),
-                    "entry_sentiment_score": position.get("entry_sentiment_score"),
-                    "entry_correlation_score": position.get("entry_correlation_score"),
-                    "entry_correlation_reason": position.get("entry_correlation_reason"),
-                    "entry_scale_in_enabled": position.get("entry_scale_in_enabled"),
-                    "entry_partial_exit_enabled": position.get("entry_partial_exit_enabled"),
-                    "entry_conviction_sizing_enabled": position.get("entry_conviction_sizing_enabled"),
-                    "entry_system": position.get("entry_system", "legacy"), "setup_id": position.get("setup_id"),
-                    "setup_kind": position.get("setup_kind"), "setup_stop_price": position.get("setup_stop_price"),
-                    "setup_target_price": position.get("setup_target_price"), "setup_rr_net": position.get("setup_rr_net"),
-                    # "partial" (see USE_PARTIAL_EXIT) marks a real,
-                    # informational P&L event on a position that's still
-                    # open -- NOT a resolved win/loss. win_rate_stats/
-                    # _maybe_run_batch_trade_analysis/perps_report's
-                    # _trade_stats all filter on this so one position's
-                    # lifecycle can't get double-counted as multiple
-                    # independent trades. Derived from the SAME comparison
-                    # the remainder-keeping block below already makes (not
-                    # from the reason string) so both a deliberate partial
-                    # take-profit AND an accidental IOC partial fill get
-                    # tagged identically and correctly.
-                    "exit_kind": "partial" if closed_count < count else "full",
-                    # Only meaningful when exit_kind == "partial" -- how much
-                    # of the position is still open afterward (see the
-                    # remainder block below, same round(count - closed_count)
-                    # math), for the distinct partial-exit Threads post.
-                    "remaining_count": round(count - closed_count, 6) if closed_count < count else None,
-                }
+                trade = _trade_record(
+                    position, ticker=ticker, side=side, entry_price=entry_price, exit_price=exit_price,
+                    closed_count=closed_count, count=count, gross_pnl=gross_pnl, fee_usd=fee_usd,
+                    realized_pnl=realized_pnl, reason=reason, dry_run=effective_dry_run,
+                    exit_fill_type=exit_fill_type, opened_at=opened_at, hold_minutes=hold_minutes,
+                )
                 trade_log = state.setdefault("trade_log", [])
                 trade_log.append(trade)
                 # Real, confirmed production incident found while building this
@@ -3375,6 +3495,8 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                         "sizing": sizing_detail,
                         **entry_context,
                     })
+                if setup_plan is not None and not effective_dry_run:
+                    _attach_exchange_bracket(positions[existing_idx] if existing_idx is not None else positions[-1], tick_size)
                 state["positions"] = positions
                 _save_state(state, push_durable=setup_plan is not None and not effective_dry_run)
             opened.append({
