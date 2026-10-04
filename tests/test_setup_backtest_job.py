@@ -138,6 +138,7 @@ def test_an_enforced_eligibility_list_skips_other_stocks(monkeypatch):
 
 
 def test_a_study_starts_only_on_a_complete_archive_and_one_at_a_time(monkeypatch):
+    monkeypatch.setattr(job, "STUDY_PRIORITY", [])  # the order between bots is tested on its own
     launched = []
     monkeypatch.setattr(job, "launch", lambda bot: launched.append(bot) or {"action": "launched"})
     monkeypatch.setattr(job, "eligibility", lambda bot: None)
@@ -308,6 +309,7 @@ def test_replays_saved_with_a_doubled_column_still_analyse(monkeypatch):
 def test_a_weekly_refresh_waits_for_the_running_study(monkeypatch):
     """The weekly timers queued their study straight away -- three ran at
     once on the Space's cores. A refresh now waits its turn."""
+    monkeypatch.setattr(job, "STUDY_PRIORITY", [])  # the order between bots is tested on its own
     launched, running = [], {"perps_multiyear"}
     monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or running.add(name) or {"action": "launched"})
     monkeypatch.setattr(job, "_running", lambda name: name in running)
@@ -346,3 +348,17 @@ def test_a_failed_run_stops_its_workers():
     for proc in procs:
         proc.join(10)
         assert not proc.is_alive()
+
+
+def test_the_real_money_bots_studies_go_first(monkeypatch):
+    """With the 15m and crypto studies both due, whichever timer fired first
+    used to take the slot; the Kalshi bots' studies now always go first."""
+    launched = []
+    monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    monkeypatch.setattr(job, "archive_ready", lambda bot: True)
+    monkeypatch.setattr(job, "eligibility", lambda bot: None)
+    grid = [f"{a}:{b}" for a, b in job.study_grid("perps")]
+    (job.LOCAL_DIR / "perps_multiyear.json").write_text(json.dumps({"grid": grid, "version": job.STUDY_VERSION["perps"]}))
+    assert job.maybe_start_multiyear("crypto")["action"] == "after_kalshi15m" and launched == []
+    assert job.maybe_start_multiyear("kalshi15m")["action"] == "launched" and launched == ["kalshi15m_multiyear"]

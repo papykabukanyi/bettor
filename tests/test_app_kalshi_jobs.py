@@ -2226,3 +2226,15 @@ def test_hf_health_check_flags_a_rejected_token(monkeypatch):
     assert good["ok"] is True and good["last_ok_at"]
     body = app_kalshi.app.test_client().get("/api/bots/live").get_json()
     assert body["hf"]["ok"] is True
+
+
+def test_kalshi_decisions_run_right_after_each_minute_closes():
+    """Both Kalshi bots decide one second after the minute closes (not on an
+    interval anchored at boot, which read each bar 30+ s late), and record
+    how fresh the decision was."""
+    import datetime as _dt
+    trig = app_kalshi._on_minute_close(1)  # noqa: SLF001
+    nxt = trig.get_next_fire_time(None, _dt.datetime(2026, 10, 4, 18, 30, 40, tzinfo=_dt.timezone.utc))
+    assert (nxt.minute, nxt.second) == (31, 1)
+    app_kalshi._note_decision("perps", {"have": 3, "of": 3, "waited_sec": 0.8, "minute_end": int(__import__("time").time()) - 2})  # noqa: SLF001
+    assert 1.5 <= app_kalshi.DECISION_TIMING["perps"]["after_close_sec"] < 10

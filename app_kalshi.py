@@ -135,7 +135,7 @@ from huggingface_hub import HfApi, hf_hub_download  # noqa: F401
 from data.kalshi_perps import get_margin_balance, get_margin_enabled, get_margin_exchange_status, get_margin_positions
 from server_common import DATA_DIR, check_rate_limit, is_cron_authorized, load_json, make_job_lock, pull_json_from_hf, save_json, win_rate_stats
 
-PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "2") or "2"))
+PERPS_CYCLE_MINUTES = max(1, int(os.getenv("PERPS_CYCLE_MINUTES", "1") or "1"))
 PERPS_FAST_CHECK_SECONDS = max(5, int(os.getenv("PERPS_FAST_CHECK_SECONDS", "20") or "20"))
 PERPS_DATA_COLLECT_MINUTES = max(5, int(os.getenv("PERPS_DATA_COLLECT_MINUTES", "15") or "15"))
 # Kalshi's own 15-minute event-contract markets (KXBTC15M etc.) -- a
@@ -163,6 +163,45 @@ KALSHI_15M_METALS_DATA_COLLECT_MINUTES = max(1, int(os.getenv("KALSHI_15M_METALS
 # check at each of those minutes -- a 2-minute cadence gave live trading
 # fewer chances than the strategy that was tested.
 KALSHI_15M_CYCLE_MINUTES = max(1, int(os.getenv("KALSHI_15M_CYCLE_MINUTES", "1") or "1"))
+# Both Kalshi bots decide one second after each minute closes, once
+# Alpaca's stream has delivered that minute's bar for their coins (waiting
+# at most KALSHI_BAR_WAIT_SEC) -- not on an interval anchored wherever the
+# Space happened to boot, which read each bar 30+ seconds late (perps up
+# to 2 minutes).
+KALSHI_BAR_WAIT_SEC = float(os.getenv("KALSHI_BAR_WAIT_SEC", "6") or "6")
+DECISION_TIMING: dict[str, dict[str, Any]] = {}
+
+
+def _on_minute_close(every_minutes: int, *, start: dt.datetime | None = None):
+    from apscheduler.triggers.cron import CronTrigger
+    return CronTrigger(minute="*" if every_minutes <= 1 else f"*/{every_minutes}", second=1, start_date=start,
+                       timezone=dt.timezone.utc)
+
+
+def _await_closed_minute(bot: str) -> dict[str, Any]:
+    """Wait for the bar that just closed for this bot's coins on Alpaca's
+    live stream (crypto on Kraken US, commodities on their SIP ETFs)."""
+    t0 = time.time()
+    try:
+        from data import alpaca_stream, kalshi_15m_setup, kalshi_15m_spot, perps_data
+        if bot == "kalshi15m":
+            coins = set(kalshi_15m_strategy.ACTIVE_ENTRY_COINS)
+        else:
+            coins = {kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(t)) for t in perps_data.chartable_tickers()}
+        wanted = {"crypto": sorted({kalshi_15m_spot.SPOT_PRODUCTS[c] for c in coins if c in kalshi_15m_spot.SPOT_PRODUCTS}),
+                  "stocks": sorted({kalshi_15m_setup.METAL_CHART_SYMBOL[c] for c in coins if c in kalshi_15m_setup.METAL_CHART_SYMBOL})}
+        return alpaca_stream.wait_for_closed_minute(wanted, timeout=KALSHI_BAR_WAIT_SEC, now=t0)
+    except Exception as exc:
+        logger.debug("[app_kalshi] waiting for the closed minute's bars failed (deciding anyway): %s", exc)
+        return {"have": 0, "of": 0, "waited_sec": round(time.time() - t0, 2), "minute_end": int(t0 // 60 * 60)}
+
+
+def _note_decision(bot: str, bars: dict[str, Any]) -> None:
+    """How fresh the bot's last decision was: seconds from the minute's
+    close to the decision, and how many of its coins' bars it had."""
+    now = time.time()
+    DECISION_TIMING[bot] = {**bars, "decided_at": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
+                            "after_close_sec": round(now - bars["minute_end"], 1) if bars.get("minute_end") else None}
 # Off-hours-agnostic (crypto trades 24/7, unlike options) -- just a
 # different hour than perps_train (3 ET) and stocks/crypto/options' own
 # daily retrains, so this doesn't contend with any of them for CPU at the
@@ -591,7 +630,9 @@ def _run_perps_entry_scan() -> dict[str, Any]:
     same defense already proven necessary on the equities entry-scan job
     (which had none at all and was OOM-crashing every 15-20 minutes)."""
     try:
+        bars = _await_closed_minute("perps")
         result = perps_strategy.scan_and_enter(dry_run=False)  # see _run_perps_fast_check
+        _note_decision("perps", bars)
         save_json(LATEST_CYCLE_FILE, result)
         return result
     finally:
@@ -942,7 +983,9 @@ def _run_kalshi_15m_cycle() -> dict[str, Any]:
     observability even before that flag is ever turned on."""
     settlement_result = kalshi_15m_strategy.check_settlements()
     management_result = kalshi_15m_strategy.manage_open_positions(dry_run=False)
+    bars = _await_closed_minute("kalshi15m")
     entry_result = kalshi_15m_strategy.scan_and_enter(dry_run=False)
+    _note_decision("kalshi15m", bars)
     # See compute_win_streak_cooldown_active's own comment -- the moment a
     # real win streak is long enough to pause on, kick off the retrain +
     # backtest verification in the BACKGROUND (never inline here: a full
@@ -1571,9 +1614,8 @@ def _ensure_background_jobs_started() -> None:
                 next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_METALS_DATA_COLLECT_MINUTES),
             )
             scheduler.add_job(
-                _run_kalshi_15m_cycle, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
-                id="kalshi_15m_cycle", replace_existing=True,
-                next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=KALSHI_15M_CYCLE_MINUTES),
+                _run_kalshi_15m_cycle, _on_minute_close(KALSHI_15M_CYCLE_MINUTES),
+                id="kalshi_15m_cycle", replace_existing=True, misfire_grace_time=20, coalesce=True,
             )
             scheduler.add_job(
                 _run_kalshi_15m_fair_value_observation, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
@@ -1746,9 +1788,9 @@ def _ensure_background_jobs_started() -> None:
                     id="perps_fast_check", replace_existing=True, executor="fastcheck",
                 )
                 scheduler.add_job(
-                    _run_perps_entry_scan, "interval", minutes=PERPS_CYCLE_MINUTES,
-                    id="perps_entry_scan", replace_existing=True, executor="fastcheck",
-                    next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS),
+                    _run_perps_entry_scan, _on_minute_close(
+                        PERPS_CYCLE_MINUTES, start=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=PERPS_STARTUP_GRACE_SECONDS)),
+                    id="perps_entry_scan", replace_existing=True, executor="fastcheck", misfire_grace_time=20, coalesce=True,
                 )
             scheduler.start()
             logger.info(
@@ -2109,6 +2151,7 @@ def api_status():
             "feature_importances": (meta or {}).get("feature_importances"),
         },
         "latest_cycle": latest_cycle,
+        "decision_timing": DECISION_TIMING.get("perps"),
         "latest_position_check": latest_position_check,
         "watchlist": perps_data.chartable_tickers() if perps_strategy.ENTRY_SYSTEM == "setup" else perps_data.get_watchlist(),
         # Real diagnostic visibility: how many instruments the chart-study
@@ -2267,6 +2310,7 @@ def api_kalshi_15m_status():
         "win_streak_cooldown": kalshi_15m_strategy.compute_win_streak_cooldown_active(state),
         "entry_mode": kalshi_15m_strategy.entry_mode(),
         "last_scan": kalshi_15m_strategy.last_scan(),
+        "decision_timing": DECISION_TIMING.get("kalshi15m"),
         "setup_backtest": setup_backtest_job.latest("kalshi15m"),
         "setup_evidence_gate": setup_backtest_job.evidence_gate("kalshi15m"),
         "market_data": _kalshi_market_data(),

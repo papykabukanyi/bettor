@@ -1221,35 +1221,47 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     the archive is complete, if it has no published study yet (or a weekly
     refresh is queued) and no other study is running (one study at a time
     gets every core). A study that failed waits FAILED_RETRY_HOURS."""
-    queued = LOCAL_DIR / f"{bot}_multiyear.queued"
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
-    err = LOCAL_DIR / f"{bot}_multiyear_error.json"
-    if err.exists() and time.time() - err.stat().st_mtime < FAILED_RETRY_HOURS * 3600:
-        return {"ok": True, "action": "failed_recently"}
-    if queued.exists():
-        if not archive_ready(bot):
-            return {"ok": True, "action": "waiting_for_archive"}
-        queued.unlink(missing_ok=True)
-        _eligibility_cache.pop(bot, None)
-        return launch(f"{bot}_multiyear")
-    wanted = [f"{a}:{b}" for a, b in study_grid(bot)]
-    version = STUDY_VERSION.get(bot, 1)
-    try:
-        # The study's own result file first: it runs in a separate process,
-        # so this server's cached eligibility can predate the result.
-        local = json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8"))
-        if local.get("grid") == wanted and local.get("version", 1) == version:
-            return {"ok": True, "action": "already_published"}
-    except (OSError, ValueError):
-        pass
-    current = eligibility(bot)
-    if current is not None and current.get("grid") == wanted and current.get("version", 1) == version:
-        return {"ok": True, "action": "already_published"}
-    if not archive_ready(bot):
-        return {"ok": True, "action": "waiting_for_archive"}
+    need = _needs_study(bot)
+    if need != "due":
+        return {"ok": True, "action": need}
+    # The real-money Kalshi bots' studies go first when several are due.
+    for first in STUDY_PRIORITY[:STUDY_PRIORITY.index(bot)] if bot in STUDY_PRIORITY else []:
+        if _needs_study(first) == "due":
+            return {"ok": True, "action": f"after_{first}"}
+    (LOCAL_DIR / f"{bot}_multiyear.queued").unlink(missing_ok=True)
     _eligibility_cache.pop(bot, None)
     return launch(f"{bot}_multiyear")
+
+
+STUDY_PRIORITY = ["perps", "kalshi15m", "crypto", "stocks", "options"]
+
+
+def _needs_study(bot: str) -> str:
+    """'due' when this bot's study should run now (a weekly refresh is
+    queued, or nothing is published at the current version and settings,
+    and its archive is complete); else why not."""
+    err = LOCAL_DIR / f"{bot}_multiyear_error.json"
+    if err.exists() and time.time() - err.stat().st_mtime < FAILED_RETRY_HOURS * 3600:
+        return "failed_recently"
+    if not (LOCAL_DIR / f"{bot}_multiyear.queued").exists():
+        wanted = [f"{a}:{b}" for a, b in study_grid(bot)]
+        version = STUDY_VERSION.get(bot, 1)
+        try:
+            # The study's own result file first: it runs in a separate process,
+            # so this server's cached eligibility can predate the result.
+            local = json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8"))
+            if local.get("grid") == wanted and local.get("version", 1) == version:
+                return "already_published"
+        except (OSError, ValueError):
+            pass
+        current = eligibility(bot)
+        if current is not None and current.get("grid") == wanted and current.get("version", 1) == version:
+            return "already_published"
+    if not archive_ready(bot):
+        return "waiting_for_archive"
+    return "due"
 
 
 _report_checked: dict[str, float] = {}

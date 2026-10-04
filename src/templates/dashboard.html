@@ -656,6 +656,11 @@ function renderStatusStrip(data, fromStudy) {
   if (n.connected !== undefined) { parts.push(`news ${n.connected ? (n.stored_articles ?? 0) : "down"}`); if (!n.connected) bad = true; }
   const feed = String(md.feed || md.stock_feed || "").toUpperCase();
   if (parts.length) out.push(statusChip("Alpaca", (feed ? feed + " · " : "") + parts.join(" · "), bad ? "bad" : "ok", md.crypto_venue || ""));
+  const dt = data.decision_timing;
+  if (dt && dt.after_close_sec != null) {
+    out.push(statusChip("Decision", `${dt.after_close_sec}s after bar close · bars ${dt.have}/${dt.of}`,
+      dt.after_close_sec <= 10 && dt.have >= dt.of ? "ok" : "warn", `${dt.decided_at || ""} · waited ${dt.waited_sec}s for Alpaca's bar`));
+  }
   const sd = statusStudy;
   if (sd && sd.ok) {
     if (sd.running && sd.progress) {

@@ -168,6 +168,7 @@ def test_crypto_15m_settles_on_the_minute_mean_and_commodities_on_the_close():
 
 
 def test_a_study_of_an_older_version_is_run_again(monkeypatch):
+    monkeypatch.setattr(job, "STUDY_PRIORITY", [])  # the order between bots is tested on its own
     launched = []
     monkeypatch.setattr(job, "launch", lambda name: launched.append(name) or {"action": "launched"})
     monkeypatch.setattr(job, "archive_ready", lambda bot: True)

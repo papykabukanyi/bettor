@@ -46,6 +46,8 @@ class BarStream:
                  ticks_fn: Callable[[], dict[str, list[str]]] | None = None):
         self.name, self.url, self.symbols_fn, self.ticks_fn = name, url, symbols_fn, ticks_fn
         self._lock = threading.Lock()
+        self._bar_arrived = threading.Condition(self._lock)
+        self._delays: list[float] = []  # seconds from a bar's close to its arrival (recent bars)
         self._bars: dict[str, dict[int, dict[str, float]]] = {}
         self._last: dict[str, dict[str, float]] = {}  # symbol -> {"price", "at", "bid", "ask"}
         self._subscribed: list[str] = []
@@ -171,6 +173,9 @@ class BarStream:
                     if len(series) > KEEP_HOURS * 60 + 120:
                         for old in [t for t in series if t < cutoff]:
                             del series[old]
+                    if kind == "b":
+                        self._delays = (self._delays + [now - (ts + 60)])[-300:]
+                    self._bar_arrived.notify_all()
                 self.stats["bars"] += 1
                 self.stats["last_bar_at"] = now
             elif kind in ("q", "t"):
@@ -205,6 +210,21 @@ class BarStream:
             return pd.DataFrame(columns=BAR_COLUMNS)
         return pd.DataFrame([{"ts": ts, **bar} for ts, bar in sorted(series.items())], columns=BAR_COLUMNS)
 
+    def wait_for_bars(self, symbols: list[str], start_ts: int, timeout: float) -> tuple[int, int]:
+        """Block until each active symbol has its bar starting at start_ts
+        (the minute that just closed), or until timeout. A symbol with no
+        bar in the 3 minutes before isn't trading (a closed ETF, a thin
+        coin) and is not waited for. Returns (have, active)."""
+        deadline = time.time() + max(0.0, timeout)
+        with self._bar_arrived:
+            active = [s for s in symbols if max(self._bars.get(s) or {0: None}) >= start_ts - 180]
+            while True:
+                have = sum(1 for s in active if max(self._bars.get(s) or {0: None}) >= start_ts)
+                left = deadline - time.time()
+                if have >= len(active) or left <= 0:
+                    return have, len(active)
+                self._bar_arrived.wait(left)
+
     def last_tick(self, symbol: str) -> dict[str, float] | None:
         with self._lock:
             tick = self._last.get(symbol)
@@ -216,6 +236,9 @@ class BarStream:
         for key in ("last_message_at", "last_bar_at"):
             s[key.replace("_at", "_age_sec")] = None if s[key] is None else round(now - s[key], 1)
         s["url"] = self.url
+        with self._lock:
+            delays = sorted(self._delays)
+        s["bar_delay_sec"] = round(delays[len(delays) // 2], 2) if delays else None  # median, close -> arrival
         return s
 
 
@@ -336,6 +359,23 @@ def latest_price(kind: str, symbol: str, *, max_age_sec: float = 15.0, now: floa
     if age > max_age_sec:
         return None
     return {**tick, "age_sec": round(max(age, 0.0), 2)}
+
+
+def wait_for_closed_minute(wanted: dict[str, list[str]], *, timeout: float, now: float | None = None) -> dict[str, Any]:
+    """A decision made right after a minute closes should read that
+    minute: wait (up to timeout seconds in all) until each stream has
+    delivered the just-closed bar for the wanted symbols ({stream: symbols}).
+    Returns {"have", "of", "waited_sec", "minute_end"}."""
+    t0 = time.time()
+    minute_end = int((now if now is not None else t0) // 60 * 60)
+    have = of = 0
+    for kind, symbols in wanted.items():
+        stream = _streams.get(kind)
+        if stream is None or not symbols:
+            continue
+        got, active = stream.wait_for_bars(list(symbols), minute_end - 60, timeout - (time.time() - t0))
+        have, of = have + got, of + active
+    return {"have": have, "of": of, "waited_sec": round(time.time() - t0, 2), "minute_end": minute_end}
 
 
 def status() -> dict[str, Any]:

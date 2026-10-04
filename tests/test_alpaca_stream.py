@@ -108,3 +108,31 @@ def test_the_crypto_stream_reads_the_chart_venue_with_the_kalshi_coins(monkeypat
     assert "USDT/USD" not in symbols and "PEPE/USDC" not in symbols
     assert "NEAR/USD" not in symbols  # the venue's last bar for it is a year old
     assert "GLD" in s._streams["stocks"].symbols_fn() and s._streams["stocks"].ticks_fn() == {"trades": s._commodity_etfs()}  # noqa: SLF001
+
+
+def test_a_decision_waits_for_the_bar_that_just_closed():
+    """The Kalshi bots decide a second after each minute closes: the wait
+    returns the moment the stream delivers that minute's bar, and never
+    waits for a symbol that isn't trading."""
+    import threading
+    import time as _t
+    st = s.BarStream("crypto", "wss://example/v1beta3/crypto/us-1", lambda: ["BTC/USD", "NEAR/USD"])
+    minute_end = int(_t.time() // 60 * 60)
+    iso = lambda ts: __import__("datetime").datetime.fromtimestamp(ts, __import__("datetime").timezone.utc).isoformat()  # noqa: E731
+    st._handle([{"T": "b", "S": "BTC/USD", "t": iso(minute_end - 120), "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])  # noqa: SLF001
+    threading.Timer(0.3, lambda: st._handle([{"T": "b", "S": "BTC/USD", "t": iso(minute_end - 60),  # noqa: SLF001
+                                              "o": 2, "h": 2, "l": 2, "c": 2, "v": 1}])).start()
+    t0 = _t.time()
+    have, active = st.wait_for_bars(["BTC/USD", "NEAR/USD"], minute_end - 60, timeout=5)
+    assert (have, active) == (1, 1) and _t.time() - t0 < 2  # NEAR has no recent bar: not waited for
+    assert st.status()["bar_delay_sec"] is not None
+
+
+def test_the_wait_is_bounded_when_a_bar_never_comes():
+    import time as _t
+    st = s.BarStream("stocks", "wss://example/v2/sip", lambda: ["GLD"])
+    minute_end = int(_t.time() // 60 * 60)
+    iso = __import__("datetime").datetime.fromtimestamp(minute_end - 120, __import__("datetime").timezone.utc).isoformat()
+    st._handle([{"T": "b", "S": "GLD", "t": iso, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])  # noqa: SLF001
+    t0 = _t.time()
+    assert st.wait_for_bars(["GLD"], minute_end - 60, timeout=0.5) == (0, 1) and 0.4 < _t.time() - t0 < 2
