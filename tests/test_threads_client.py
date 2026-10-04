@@ -1120,3 +1120,45 @@ def test_get_valid_access_token_still_works_normally_once_the_lock_is_free(monke
     monkeypatch.setattr(threads_client, "_STATE_LOCK_ACQUIRE_TIMEOUT_SEC", 5.0)
     assert threads_client.get_valid_access_token() == "at-1"
     assert not threads_client._STATE_LOCK.locked()  # noqa: SLF001 -- released properly
+
+
+def test_an_error_never_carries_the_access_token():
+    """The Space logs every failed post: the URL's token must not be in it."""
+    resp = _FakeResponse({"error": {"message": "x"}}, status_code=400,
+                         url="https://graph.threads.net/v1.0/u/threads_publish?creation_id=1&access_token=THAAsecret123")
+    with pytest.raises(threads_client.requests.exceptions.HTTPError) as err:
+        threads_client._raise_for_status_with_body(resp)  # noqa: SLF001
+    assert "THAAsecret123" not in str(err.value) and "access_token=REDACTED" in str(err.value)
+
+
+def test_a_media_not_found_publish_is_retried_once(monkeypatch):
+    """Live on the Space: threads_publish answered 400 "Media Not Found"
+    (4279009) for a container Meta had not finished propagating; the
+    second attempt after a short wait goes through."""
+    threads_client._token_cache.update({  # noqa: SLF001
+        "access_token": "at-1", "user_id": "user-42",
+        "obtained_at": threads_client.time.time(), "expires_at": threads_client.time.time() + 1000000,
+    })
+    monkeypatch.setattr(threads_client, "_PUBLISH_RETRY_DELAY_SEC", 0)
+    publishes = []
+
+    def fake_post(url, *, params, timeout):
+        if "threads_publish" in url:
+            publishes.append(1)
+            if len(publishes) == 1:
+                return _FakeResponse({}, status_code=400, text='{"error":{"code":24,"error_subcode":4279009}}', url=url)
+            return _FakeResponse({"id": "post-999"})
+        return _FakeResponse({"id": "creation-123"})
+
+    monkeypatch.setattr(threads_client.requests, "post", fake_post)
+    monkeypatch.setattr(threads_client.requests, "get", lambda url, *, params, timeout: _FakeResponse({"status": "FINISHED"}))
+    assert threads_client.create_and_publish_post("hello") == "post-999" and len(publishes) == 2
+
+
+def test_no_log_line_carries_an_access_token(caplog):
+    """A connection error's text includes the whole request URL: whatever
+    module logs it, the token is masked."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger("data.threads_post").warning("failed to post: %s", "Max retries exceeded with url: /v1.0/u/threads?access_token=THAAsecret9&x=1")
+    assert "THAAsecret9" not in caplog.text and "access_token=REDACTED&x=1" in caplog.text

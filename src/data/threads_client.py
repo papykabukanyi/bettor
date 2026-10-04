@@ -242,7 +242,62 @@ def _raise_for_status_with_body(resp: requests.Response) -> None:
         body = resp.text[:500]
         if "4279002" in body or "Rate Limit Exceeded" in body:
             _note_rate_limited()
-        raise requests.exceptions.HTTPError(f"{resp.status_code} error for url: {resp.url} -- body: {body}", response=resp)
+        raise requests.exceptions.HTTPError(f"{resp.status_code} error for url: {_redact(resp.url)} -- body: {body}", response=resp)
+
+
+def _redact(url: str) -> str:
+    """The URL without its access token (errors are logged on the Space)."""
+    import re
+    return re.sub(r"(access_token=)[^&\s'\"]+", r"\1REDACTED", str(url))
+
+
+def _install_log_redaction() -> None:
+    """Every log line in the process loses any access_token=... -- a
+    connection error's message carries the full request URL too, and the
+    callers that log Threads failures are spread over every server."""
+    base = logging.getLogRecordFactory()
+    if getattr(base, "_redacts_access_tokens", False):
+        return
+
+    def factory(*args, **kwargs):
+        record = base(*args, **kwargs)
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return record
+        if "access_token=" in msg:
+            record.msg, record.args = _redact(msg), ()
+        return record
+
+    factory._redacts_access_tokens = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(factory)
+
+
+_install_log_redaction()
+
+
+# Meta's "Media Not Found" (error_subcode 4279009) on a container that just
+# reported ready, or whose status checks never answered: the container is
+# still propagating. One more wait-and-publish gets it out.
+_PUBLISH_RETRY_DELAY_SEC = float(os.getenv("THREADS_PUBLISH_RETRY_DELAY_SEC", "8") or "8")
+
+
+def _publish_container(user_id: str, creation_id: str, token: str) -> str:
+    for attempt in (1, 2):
+        publish_resp = requests.post(
+            f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
+            params={"creation_id": creation_id, "access_token": token},
+            timeout=TIMEOUT_SEC,
+        )
+        if attempt == 1 and publish_resp.status_code == 400 and "4279009" in (publish_resp.text or ""):
+            time.sleep(_PUBLISH_RETRY_DELAY_SEC)
+            status = _wait_for_container_ready(creation_id, token)
+            if status in ("ERROR", "EXPIRED"):
+                raise RuntimeError(f"Threads container {creation_id} reached terminal status {status} -- not attempting publish")
+            continue
+        _raise_for_status_with_body(publish_resp)
+        return publish_resp.json()["id"]
+    raise AssertionError("unreachable")
 
 
 def get_authorization_url(*, state: str = "") -> str:
@@ -530,13 +585,7 @@ def create_and_publish_post(
     if status in ("ERROR", "EXPIRED"):
         raise RuntimeError(f"Threads container {creation_id} reached terminal status {status} -- not attempting publish")
 
-    publish_resp = requests.post(
-        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
-        params={"creation_id": creation_id, "access_token": token},
-        timeout=TIMEOUT_SEC,
-    )
-    _raise_for_status_with_body(publish_resp)
-    return publish_resp.json()["id"]
+    return _publish_container(user_id, creation_id, token)
 
 
 def create_and_publish_image_post(
@@ -582,13 +631,7 @@ def create_and_publish_image_post(
     if status in ("ERROR", "EXPIRED"):
         raise RuntimeError(f"Threads container {creation_id} reached terminal status {status} -- not attempting publish")
 
-    publish_resp = requests.post(
-        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
-        params={"creation_id": creation_id, "access_token": token},
-        timeout=TIMEOUT_SEC,
-    )
-    _raise_for_status_with_body(publish_resp)
-    return publish_resp.json()["id"]
+    return _publish_container(user_id, creation_id, token)
 
 
 # Threads' own documented carousel limits (same as Instagram's, which the
@@ -671,13 +714,7 @@ def create_and_publish_carousel_post(
     if status in ("ERROR", "EXPIRED"):
         raise RuntimeError(f"Threads carousel container {creation_id} reached terminal status {status} -- not attempting publish")
 
-    publish_resp = requests.post(
-        f"{API_BASE_URL}/{API_VERSION}/{user_id}/threads_publish",
-        params={"creation_id": creation_id, "access_token": token},
-        timeout=TIMEOUT_SEC,
-    )
-    _raise_for_status_with_body(publish_resp)
-    return publish_resp.json()["id"]
+    return _publish_container(user_id, creation_id, token)
 
 
 # ---------------------------------------------------------------------------
