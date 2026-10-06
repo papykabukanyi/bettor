@@ -448,8 +448,10 @@ def place_order(order_spec: dict[str, Any]) -> str:
     return order_id
 
 
-def get_order(order_id: str) -> dict[str, Any]:
-    return _trading_get(f"/v2/orders/{order_id}")
+def get_order(order_id: str, *, nested: bool = False) -> dict[str, Any]:
+    """One order; nested=True includes a bracket's take-profit / stop-loss
+    legs (their status, fill price and time)."""
+    return _trading_get(f"/v2/orders/{order_id}", params={"nested": "true"} if nested else None)
 
 
 def get_orders(*, status: str | None = None, limit: int = 50, symbols: list[str] | None = None) -> list[dict[str, Any]]:

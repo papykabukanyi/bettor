@@ -922,11 +922,34 @@ def _setup_news(coin: str) -> tuple[float | None, float | None]:
         return None, None
 
 
+WINDOW_SEC = 900
+
+
+def _local_window(now: float | None = None) -> tuple[int, int]:
+    """The current 15-minute window (open, close) in unix seconds: Kalshi's
+    15m series open on the quarter hour."""
+    open_ts = int((time.time() if now is None else now) // WINDOW_SEC * WINDOW_SEC)
+    return open_ts, open_ts + WINDOW_SEC
+
+
+def _market_open_ts(market: dict[str, Any]) -> int | None:
+    try:
+        return int(dt.datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00")).timestamp())
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _evaluate_candidate_setup(
-    coin: str, market: dict[str, Any], seconds_to_close: float, *, traded_setup_ids: frozenset[str] = frozenset(),
+    coin: str, market: dict[str, Any] | None, seconds_to_close: float, *, traded_setup_ids: frozenset[str] = frozenset(),
+    fetch_market=None, window_open_ts: int | None = None,
 ) -> dict[str, Any]:
     """Setup-mode decision for one coin -- see ENTRY_MODE. Blocked results
-    carry the checklist so the dashboard shows which rule stopped it."""
+    carry the checklist so the dashboard shows which rule stopped it.
+
+    With market=None the chart is read first (Alpaca only, on the window
+    open from _local_window) and Kalshi's market is fetched (fetch_market)
+    only once the setup could enter -- reading every coin's market every
+    minute tripped Kalshi's rate limit."""
     from data import kalshi_15m_setup, setup_backtest_job
     # Multi-year evidence (setup_backtest_job.run_multiyear on Alpaca's
     # archives): when the walk-forward proves it, the trained plan setting,
@@ -941,12 +964,7 @@ def _evaluate_candidate_setup(
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"ok": False, "reason": "not_eligible", "entry_mode": "setup", "setup_reason": "eligibility",
                 "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
-    open_ts = None
-    if market.get("open_time"):
-        try:
-            open_ts = int(dt.datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00")).timestamp())
-        except (TypeError, ValueError):
-            open_ts = None
+    open_ts = _market_open_ts(market) if market is not None else window_open_ts
     news, news_count = _setup_news(coin)
     try:
         setup = kalshi_15m_setup.live_setup(coin, news_score=news, strike_ts=open_ts)
@@ -985,6 +1003,16 @@ def _evaluate_candidate_setup(
     blocked = setup_backtest_job.blocked_reason(elig.get("blocked") if enforce else None, info["entry_conditions"])
     if blocked:
         return {"ok": False, "reason": f"learned_losing_condition:{blocked}", **info}
+    if market is None:
+        market = fetch_market() if fetch_market is not None else None
+        if market is None:
+            return {"ok": False, "reason": "no_open_window", **info}
+        if open_ts is None or _market_open_ts(market) is None or abs(_market_open_ts(market) - open_ts) > 60:
+            return {"ok": False, "reason": "window_mismatch", **info}
+        live_left = kalshi_15m.seconds_to_close(market)
+        seconds_to_close = live_left if live_left is not None else seconds_to_close
+        if seconds_to_close < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
+            return {"ok": False, "reason": "too_little_time_remaining", "seconds_to_close": seconds_to_close, **info}
     plan = kalshi_15m_setup.contract_plan(setup, market, seconds_to_close=seconds_to_close,
                                           strike_underlying=float(setup["strike_underlying"]))
     info["contract_plan"] = plan
@@ -1410,6 +1438,13 @@ def evaluate_candidate(
         return {"ok": False, "reason": "unknown_coin"}
 
     market = ((live_context or {}).get("markets") or {}).get(coin)
+    if market is None and entry_mode() == "setup":
+        # The chart first (Alpaca), Kalshi's market only for a setup that
+        # could enter (see _evaluate_candidate_setup).
+        open_ts, close_ts = _local_window()
+        return _evaluate_candidate_setup(coin, None, close_ts - time.time(), traded_setup_ids=traded_setup_ids,
+                                         fetch_market=lambda: kalshi_15m.get_current_window_market(series_ticker),
+                                         window_open_ts=open_ts)
     if market is None:
         market = kalshi_15m.get_current_window_market(series_ticker)
     if market is None:
@@ -1797,12 +1832,17 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                 checks.append({"coin": coin, "ok": False, **trust})
                 continue
 
-        decision = evaluate_candidate(
-            coin, confidence_min=confidence_min_override,
-            correlation_study_enabled=correlation_study_enabled_override,
-            correlation_max_adjustment=correlation_max_adjustment_override,
-            trade_log=state.get("trade_log"), live_context=live_context, traded_setup_ids=traded_setup_ids,
-        )
+        try:
+            decision = evaluate_candidate(
+                coin, confidence_min=confidence_min_override,
+                correlation_study_enabled=correlation_study_enabled_override,
+                correlation_max_adjustment=correlation_max_adjustment_override,
+                trade_log=state.get("trade_log"), live_context=live_context, traded_setup_ids=traded_setup_ids,
+            )
+        except Exception as exc:
+            # One coin's failure (a Kalshi 429, say) never stops the others.
+            logger.warning("[kalshi_15m_strategy] %s skipped this cycle: %s", coin, exc)
+            decision = {"ok": False, "reason": f"error: {str(exc)[:160]}"}
         if not decision.get("ok"):
             checks.append({"coin": coin, **decision})
             continue

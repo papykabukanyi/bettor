@@ -1014,11 +1014,63 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
         local["entry_price"] = real_pos["entry_price"]
         reconciled.append(local)
 
-    for symbol in local_by_symbol:
-        if symbol not in real:
-            logger.warning("[alpaca_strategy] dropping phantom local position (no matching real fill): %s", symbol)
+    for symbol, local in local_by_symbol.items():
+        if symbol in real:
+            continue
+        closed = _bracket_close(local)
+        if closed is not None:
+            _book_bracket_close(state, local, closed)
+            continue
+        logger.warning("[alpaca_strategy] dropping phantom local position (no matching real fill): %s", symbol)
 
     return reconciled
+
+
+def _bracket_close(position: dict[str, Any]) -> dict[str, Any] | None:
+    """A position gone from Alpaca whose own bracket closed it: the leg that
+    filled (price, time, which leg), else None (the entry never filled)."""
+    if not position.get("order_id"):
+        return None
+    from data import alpaca_client
+    try:
+        order = alpaca_client.get_order(position["order_id"], nested=True)
+    except Exception as exc:
+        logger.warning("[alpaca_strategy] bracket lookup failed for %s: %s", position.get("symbol"), exc)
+        return None
+    if order.get("status") != "filled":
+        return None
+    for leg in order.get("legs") or []:
+        if leg.get("status") == "filled" and leg.get("filled_avg_price"):
+            kind = "take_profit" if leg.get("type") == "limit" else "stop_loss"
+            return {"price": float(leg["filled_avg_price"]), "qty": float(leg.get("filled_qty") or position["count"]),
+                    "at": leg.get("filled_at"), "kind": kind}
+    return None
+
+
+def _book_bracket_close(state: dict[str, Any], position: dict[str, Any], closed: dict[str, Any]) -> None:
+    """Record a trade Alpaca's bracket closed between checks (the position
+    was only ever dropped as a phantom before -- its result never booked)."""
+    entry = float(position["entry_price"])
+    count = float(closed["qty"])
+    gross = (closed["price"] - entry) * count
+    trade_log = state.setdefault("trade_log", [])
+    if any(t.get("symbol") == position["symbol"] and t.get("opened_at") == position.get("opened_at") for t in trade_log[-20:]):
+        return
+    closed_at = closed.get("at") or dt.datetime.now(dt.timezone.utc).isoformat()
+    by_date = state.setdefault("realized_pnl_by_date", {})
+    day = str(closed_at)[:10]
+    by_date[day] = round(float(by_date.get(day, 0.0)) + gross, 6)
+    trade = {"closed_at": closed_at, "opened_at": position.get("opened_at"), "symbol": position["symbol"],
+             "entry_price": entry, "exit_price": closed["price"], "count": count, "realized_pnl_usd": round(gross, 6),
+             "reason": f"bracket_{closed['kind']} (Alpaca filled {closed['price']:.4f})", "dry_run": False,
+             "entry_system": position.get("entry_system", "legacy"), "setup_id": position.get("setup_id"),
+             "setup_kind": position.get("setup_kind"), "setup_stop_price": position.get("setup_stop_price"),
+             "setup_target_price": position.get("setup_target_price"), "setup_rr_net": position.get("setup_rr_net")}
+    trade_log.append(trade)
+    if len(trade_log) > MAX_TRADE_LOG_ENTRIES:
+        del trade_log[: len(trade_log) - MAX_TRADE_LOG_ENTRIES]
+    logger.info("[alpaca_strategy] %s closed by its Alpaca bracket (%s) at %.4f: %+.2f USD", position["symbol"],
+                closed["kind"], closed["price"], gross)
 
 
 def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None = None) -> dict[str, Any]:

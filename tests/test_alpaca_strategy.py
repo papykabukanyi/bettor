@@ -1666,3 +1666,27 @@ def test_setup_entry_is_skipped_when_the_bet_is_already_open_across_bots(setup_m
     assert result["opened"][0]["action"] == "skipped_correlated_exposure"
     assert seen == {"symbol": "AAPL", "direction": "long", "bot": "stocks"}
     assert strat._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_a_position_closed_by_its_alpaca_bracket_is_booked_not_dropped(monkeypatch):
+    """Seen in the Space log: a stocks position Alpaca's own bracket closed
+    between checks was dropped as a 'phantom' and its result never
+    recorded. It is booked at the leg's real fill; an entry that never
+    filled is still dropped without a trade."""
+    from data import alpaca_client
+    monkeypatch.setattr(strat, "_real_open_positions_by_symbol", lambda: {})
+    orders = {
+        "o-uber": {"status": "filled", "legs": [
+            {"type": "limit", "status": "canceled"},
+            {"type": "stop", "status": "filled", "filled_avg_price": "71.20", "filled_qty": "10", "filled_at": "2026-10-05T15:02:00Z"}]},
+        "o-never": {"status": "canceled", "legs": []},
+    }
+    monkeypatch.setattr(alpaca_client, "get_order", lambda oid, nested=False: orders[oid])
+    state = {"positions": [{"symbol": "UBER", "entry_price": 72.0, "count": 10.0, "order_id": "o-uber", "opened_at": "2026-10-05T14:00:00+00:00"},
+                           {"symbol": "COST", "entry_price": 900.0, "count": 1.0, "order_id": "o-never", "opened_at": "2026-10-05T14:05:00+00:00"}]}
+    assert strat._reconcile_positions_with_exchange(state) == []  # noqa: SLF001
+    (t,) = state["trade_log"]
+    assert t["symbol"] == "UBER" and t["exit_price"] == 71.2 and t["realized_pnl_usd"] == -8.0 and t["reason"].startswith("bracket_stop_loss")
+    assert state["realized_pnl_by_date"]["2026-10-05"] == -8.0
+    strat._reconcile_positions_with_exchange(state)  # noqa: SLF001 -- never booked twice
+    assert len(state["trade_log"]) == 1

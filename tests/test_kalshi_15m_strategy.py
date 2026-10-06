@@ -3091,6 +3091,13 @@ def setup_mode(monkeypatch):
     monkeypatch.setattr(kalshi_15m_setup, "live_setup", fake_live_setup)
     monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series: _setup_market())
 
+    def window_of_the_test_market(now=None):  # the bot's own window clock follows whichever test market is set
+        m = kalshi_15m.get_current_window_market("KXBTC15M")
+        ts = lambda k: int(dt.datetime.fromisoformat(m[k].replace("Z", "+00:00")).timestamp())  # noqa: E731
+        return ts("open_time"), ts("close_time")
+
+    monkeypatch.setattr(kalshi_15m_strategy, "_local_window", window_of_the_test_market)
+
     def fail(*a, **k):
         raise AssertionError("no model read in setup mode")
 
@@ -3292,3 +3299,34 @@ def test_setup_mode_records_the_price_edge_and_requires_a_proven_minimum(setup_m
     monkeypatch.setattr(setup_backtest_job, "price_edge_min", lambda: free["price_edge"] + 0.05)
     held = kalshi_15m_strategy.evaluate_candidate("BTC")
     assert held["ok"] is False and held["reason"].startswith("price_edge_below_min")
+
+
+def test_setup_mode_reads_kalshi_only_for_a_setup_that_could_enter(setup_mode, monkeypatch):
+    """The chart is read first, on the window's own clock; Kalshi's market
+    is fetched only for a valid setup -- reading every coin's market every
+    minute tripped Kalshi's rate limit (429) and aborted whole scans."""
+    from data import kalshi_15m_setup
+    fetched = []
+    monkeypatch.setattr(kalshi_15m, "get_current_window_market", lambda series: fetched.append(series) or _setup_market())
+    monkeypatch.setattr(kalshi_15m_setup, "live_setup", lambda coin, **kw: {**_SETUP, "valid": False, "reason": "trend"})
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["reason"] == "setup_trend"
+    assert fetched == ["KXBTC15M"]  # only the window clock's own read (the test fixture); no market read by the scan
+    fetched.clear()
+    monkeypatch.setattr(kalshi_15m_setup, "live_setup", lambda coin, **kw: dict(_SETUP))
+    assert kalshi_15m_strategy.evaluate_candidate("BTC")["ok"] is True and len(fetched) >= 2
+
+
+def test_one_coins_kalshi_error_never_stops_the_scan(setup_mode, monkeypatch):
+    calls = []
+
+    def flaky(coin, **kw):
+        calls.append(coin)
+        if coin == "BTC":
+            raise RuntimeError("Kalshi API error 429: too many requests")
+        return {"ok": False, "reason": "setup_trend"}
+
+    monkeypatch.setattr(kalshi_15m_strategy, "evaluate_candidate", flaky)
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", ("BTC", "ETH"))
+    result = kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    reasons = {c["coin"]: c.get("reason") for c in result.get("checks") or []}
+    assert "ETH" in calls and reasons.get("BTC", "").startswith("error: Kalshi API error 429") and reasons.get("ETH") == "setup_trend"

@@ -441,6 +441,9 @@ scheduler = BackgroundScheduler(
     executors={
         "default": APSThreadPoolExecutor(max_workers=3),
         "fastcheck": APSThreadPoolExecutor(max_workers=3),
+        # The 15m bot's minute-close decision never queues behind data
+        # uploads in "default" (seen live: a cycle missed by 21 s).
+        "decisions": APSThreadPoolExecutor(max_workers=1),
     },
 )
 _startup_lock = threading.Lock()
@@ -1610,7 +1613,7 @@ def _ensure_background_jobs_started() -> None:
             )
             scheduler.add_job(
                 _run_kalshi_15m_cycle, _on_minute_close(KALSHI_15M_CYCLE_MINUTES),
-                id="kalshi_15m_cycle", replace_existing=True, misfire_grace_time=20, coalesce=True,
+                id="kalshi_15m_cycle", replace_existing=True, executor="decisions", misfire_grace_time=30, coalesce=True,
             )
             scheduler.add_job(
                 _run_kalshi_15m_fair_value_observation, "interval", minutes=KALSHI_15M_CYCLE_MINUTES,
