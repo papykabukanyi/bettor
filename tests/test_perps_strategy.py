@@ -4348,3 +4348,31 @@ def test_a_chosen_hold_limit_closes_the_trade_on_time():
     assert perps_setup.plan_exit(p, 100.5, held_minutes=241) == (True, "time_exit (241 min)")
     legacy = _bracket_position(entry_price=100.0, setup_stop_price=99.0, setup_target_price=110.0)
     assert perps_setup.plan_exit(legacy, 100.5, held_minutes=1441)[1].startswith("max_hold_safety")
+
+
+def test_a_setup_position_at_its_hold_limit_is_closed_and_its_kalshi_bracket_cancelled(monkeypatch, tmp_path):
+    """Live today: a short ADA perp held toward its 24 h limit. The bot's own
+    close must go through as a real order, be booked, and the stop/target
+    left on Kalshi must be cancelled (nothing left to protect)."""
+    monkeypatch.setattr(strat, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(strat, "LIVE_TRADING_ENABLED", True)
+    pos = _bracket_position(ticker="KXADAPERP", side="short", entry_price=0.2635, count=47.0,
+                            opened_at=(dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1441)).isoformat(),
+                            setup_stop_price=0.2665, setup_target_price=0.2473, setup_max_hold_minutes=1440.0,
+                            exchange_bracket={"id": "17d9", "status": "active", "stop": 0.2665, "target": 0.2473})
+    strat._save_state({"positions": [pos], "realized_pnl_by_date": {}, "trade_log": [], "daily_reference_balance": {}})
+    calls = {"n": 0}
+
+    def fake_positions():
+        calls["n"] += 1
+        return {"positions": [_real_position("KXADAPERP", "-47.00", "0.2635")] if calls["n"] == 1 else []}
+
+    orders, cancelled = [], []
+    monkeypatch.setattr(strat, "get_margin_positions", fake_positions)
+    monkeypatch.setattr(strat, "get_margin_market", lambda ticker: _market_response(price=0.2538, bid=0.2537, ask=0.2539))
+    monkeypatch.setattr(strat, "create_margin_order", lambda **kw: orders.append(kw) or {"order": {"fill_count": str(kw["count"])}})
+    monkeypatch.setattr(strat, "cancel_cross_exit_triggers", lambda ticker: cancelled.append(ticker))
+    result = strat.manage_open_positions(dry_run=False)
+    (trade,) = result["closed"]
+    assert trade["reason"].startswith("max_hold_safety") and trade["realized_pnl_usd"] > 0  # a short that fell: profit
+    assert len(orders) == 1 and cancelled == ["KXADAPERP"] and strat._load_state()["positions"] == []  # noqa: SLF001

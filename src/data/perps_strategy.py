@@ -3034,6 +3034,14 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 # already caps how often this can actually hit HF even if
                 # several positions close in the same cycle.
                 _save_state(state, push_durable=True)
+                if closed_count >= count and position.get("exchange_bracket") and not effective_dry_run:
+                    # Closed by the bot itself (time exit, its own stop/target
+                    # check): the stop/target left on Kalshi has nothing to
+                    # protect any more.
+                    try:
+                        cancel_cross_exit_triggers(ticker)
+                    except Exception as exc:
+                        logger.warning("[perps_strategy] could not cancel the exchange bracket for %s: %s", ticker, exc)
 
                 if closed_count < count:
                     # Partial fill -- the remainder is still genuinely open on
