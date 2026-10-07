@@ -4376,3 +4376,19 @@ def test_a_setup_position_at_its_hold_limit_is_closed_and_its_kalshi_bracket_can
     (trade,) = result["closed"]
     assert trade["reason"].startswith("max_hold_safety") and trade["realized_pnl_usd"] > 0  # a short that fell: profit
     assert len(orders) == 1 and cancelled == ["KXADAPERP"] and strat._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_a_restart_keeps_the_exit_rule_its_state_and_the_kalshi_bracket(monkeypatch):
+    """What HF keeps for an open setup position: the chosen hold limit, a
+    stop already moved to break-even and the bracket on Kalshi -- restored
+    onto the real position after a restart."""
+    pos = _bracket_position(ticker="KXADAPERP", side="short", entry_price=0.2635, count=47.0, setup_stop_price=0.2635,
+                            setup_initial_stop_price=0.2665, setup_breakeven_r=1.0, setup_breakeven_done=True,
+                            setup_max_hold_minutes=480.0, exchange_bracket={"id": "17d9", "status": "active"})
+    saved = strat._durable_state_slice({"positions": [pos]})["open_setup_plans"]["KXADAPERP"]  # noqa: SLF001
+    assert saved["setup_breakeven_done"] is True and saved["setup_max_hold_minutes"] == 480.0 and saved["exchange_bracket"]["id"] == "17d9"
+    monkeypatch.setattr(strat, "_real_open_positions_by_ticker",
+                        lambda: {"KXADAPERP": {"side": "short", "count": 47.0, "entry_price": 0.2635}})
+    (restored,) = strat._reconcile_positions_with_exchange({"positions": [], "open_setup_plans": {"KXADAPERP": saved}})  # noqa: SLF001
+    assert restored["setup_stop_price"] == 0.2635 and restored["setup_initial_stop_price"] == 0.2665
+    assert restored["setup_max_hold_minutes"] == 480.0 and restored["exchange_bracket"]["id"] == "17d9"

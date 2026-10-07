@@ -800,6 +800,10 @@ def _durable_state_slice(state: dict[str, Any]) -> dict[str, Any]:
 _SETUP_POSITION_KEYS = (
     "side", "opened_at", "entry_system", "setup_stop_price", "setup_target_price", "setup_id", "setup_kind",
     "setup_rr_net", "setup_risk_pct", "setup_chart_plan",
+    # The exit rule and its state, and the bracket on Kalshi: a restart
+    # must keep the chosen hold limit, a stop already moved to break-even,
+    # and the bracket to cancel when the bot closes the position itself.
+    "setup_initial_stop_price", "setup_max_hold_minutes", "setup_breakeven_r", "setup_breakeven_done", "exchange_bracket",
 )
 
 
@@ -2732,6 +2736,7 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
         scale_ins_this_cycle: list[dict[str, Any]] = []
         ok = True
+        plans_changed = False
         for position in positions:
             # ticker via .get(), not position["ticker"] -- this whole body
             # is one try/except below specifically so a single malformed or
@@ -2833,9 +2838,10 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
                 if perps_setup.has_plan(position) and perps_setup.plan_update(position, current_price):
                     # Break-even reached: the stop is now the entry price, on
-                    # Kalshi too.
+                    # Kalshi too (and saved to HF at the end of this pass).
                     logger.info("[perps_strategy] %s break-even: stop moved to entry %.6g", ticker, position["setup_stop_price"])
                     _attach_exchange_bracket(position, tick_size)
+                    plans_changed = True
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity, external_velocity_pct_per_min=external_velocity,
                     current_volatility=current_volatility, now=now,
@@ -3073,9 +3079,10 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
 
         state["positions"] = remaining
         # push_durable only when a trade actually closed this cycle (real
-        # money moved, realized_pnl_by_date changed) -- not on every 20s
-        # tick just because positions/velocity samples were touched.
-        _save_state(state, push_durable=bool(closed))
+        # money moved, realized_pnl_by_date changed) or an open plan changed
+        # (a break-even stop) -- not on every 20s tick just because
+        # positions/velocity samples were touched.
+        _save_state(state, push_durable=bool(closed) or plans_changed)
         result = {
             "ok": ok, "dry_run": effective_dry_run,
             "action": "closed" if closed else ("none" if remaining else "no_position"),
