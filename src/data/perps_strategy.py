@@ -2480,6 +2480,33 @@ def _attach_exchange_bracket(position: dict[str, Any], tick_size: float) -> None
         position["exchange_bracket"] = {"error": str(exc)[:200], "stop": stop_px, "target": target_px, "at": now}
 
 
+def _plan_from_exchange_bracket(ticker: str, side: str) -> dict[str, Any] | None:
+    """A setup position's plan read back from its live bracket on Kalshi
+    (stop, target, and the time it was set -- the entry), or None."""
+    try:
+        triggers = get_cross_exit_triggers(ticker)
+    except Exception as exc:
+        logger.warning("[perps_strategy] could not read the exchange bracket for %s: %s", ticker, exc)
+        return None
+    for t in triggers:
+        if t.get("kind", "bracket") != "bracket" or t.get("status") not in ("active", "pending_on_entry"):
+            continue
+        try:
+            stop, target = float(t["stop_loss_price"]), float(t["take_profit_price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (side == "long" and stop < target) or (side == "short" and stop > target):
+            plan = {"side": side, "entry_system": "setup", "setup_stop_price": stop, "setup_target_price": target,
+                    "setup_initial_stop_price": stop, "plan_source": "kalshi_bracket",
+                    "exchange_bracket": {"id": t.get("id"), "status": t.get("status"), "stop": stop, "target": target}}
+            if t.get("created_time"):
+                plan["opened_at"] = str(t["created_time"]).replace("Z", "+00:00")
+            logger.warning("[perps_strategy] %s: no saved plan; rebuilt stop %.6g / target %.6g from its Kalshi bracket",
+                           ticker, stop, target)
+            return plan
+    return None
+
+
 def _exchange_close_reason(ticker: str, position: dict[str, Any]) -> str:
     """Why Kalshi closed the position: the bracket leg that fired, else a
     close made outside this bot."""
@@ -2584,6 +2611,11 @@ def _reconcile_positions_with_exchange(state: dict[str, Any]) -> list[dict[str, 
                 "sizing": {"note": "adopted_from_exchange_reconciliation"},
             }
             plan = saved_plans.get(ticker)
+            if not (plan and perps_setup.has_plan(plan)) and EXCHANGE_BRACKETS:
+                # No saved plan (HF unreachable at boot, say): the bracket
+                # live on Kalshi is the plan -- never fall back to the old
+                # default exits on a setup trade.
+                plan = _plan_from_exchange_bracket(ticker, real_pos["side"])
             if plan and plan.get("side") == real_pos["side"] and perps_setup.has_plan(plan):
                 adopted.update({k: v for k, v in plan.items() if v is not None})
                 adopted["sizing"] = {"note": "adopted_from_exchange_reconciliation_with_saved_setup_plan"}

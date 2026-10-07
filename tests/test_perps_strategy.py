@@ -4392,3 +4392,22 @@ def test_a_restart_keeps_the_exit_rule_its_state_and_the_kalshi_bracket(monkeypa
     (restored,) = strat._reconcile_positions_with_exchange({"positions": [], "open_setup_plans": {"KXADAPERP": saved}})  # noqa: SLF001
     assert restored["setup_stop_price"] == 0.2635 and restored["setup_initial_stop_price"] == 0.2665
     assert restored["setup_max_hold_minutes"] == 480.0 and restored["exchange_bracket"]["id"] == "17d9"
+
+
+def test_without_a_saved_plan_the_kalshi_bracket_restores_it(monkeypatch):
+    """Seen live: after a restart the Space couldn't reach HF (invalid
+    token), so an open ADA short came back without its plan and the old
+    default exits took over. The bracket live on Kalshi is the plan."""
+    monkeypatch.setattr(strat, "_real_open_positions_by_ticker",
+                        lambda: {"KXADAPERP": {"side": "short", "count": 47.0, "entry_price": 0.2635}})
+    monkeypatch.setattr(strat, "get_cross_exit_triggers", lambda ticker: [
+        {"id": "old", "kind": "bracket", "status": "canceled", "stop_loss_price": "0.3000", "take_profit_price": "0.2000"},
+        {"id": "17d9", "kind": "bracket", "status": "active", "stop_loss_price": "0.2665", "take_profit_price": "0.2473",
+         "created_time": "2026-10-07T01:37:09Z"}])
+    (pos,) = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert pos["setup_stop_price"] == 0.2665 and pos["setup_target_price"] == 0.2473 and pos["entry_system"] == "setup"
+    assert pos["opened_at"] == "2026-10-07T01:37:09+00:00" and pos["exchange_bracket"]["id"] == "17d9"
+    assert strat.decide_exit(pos, 0.2550)[1] == "holding for the planned stop or target"  # not the old +2% take-profit
+    monkeypatch.setattr(strat, "get_cross_exit_triggers", lambda ticker: [])
+    (bare,) = strat._reconcile_positions_with_exchange({"positions": []})  # noqa: SLF001
+    assert bare.get("setup_stop_price") is None  # no bracket either: adopted as before
