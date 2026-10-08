@@ -115,6 +115,12 @@ MIN_BARS_5M = VOLUME_LOOKBACK_5M + 5
 
 SESSION = "us_equity"
 MAX_HOLD_SAFETY_MINUTES = _env_int("ALPACA_SETUP_MAX_HOLD_SAFETY_MINUTES", 390)
+# Exit rules the multi-year study chooses between (adopted only when they
+# win on years the choice never saw): a time exit (close after
+# MAX_HOLD_HOURS) and a break-even stop (once the trade is BREAKEVEN_R x its
+# risk in profit, its stop moves to the entry price; 0 = off).
+MAX_HOLD_HOURS = _env_float("ALPACA_SETUP_MAX_HOLD_HOURS", MAX_HOLD_SAFETY_MINUTES / 60.0)
+BREAKEVEN_R = _env_float("ALPACA_SETUP_BREAKEVEN_R", 0.0)
 STALE_AFTER_SEC = 180
 
 CHECK_ORDER = ["data", "trend", "breakout", "volume", "retest", "hold", "vwap", "momentum", "divergence", "news", "risk_reward", "correlation"]
@@ -709,77 +715,124 @@ def has_plan(position: dict[str, Any]) -> bool:
 
 
 def plan_exit(position: dict[str, Any], price: float, *, held_minutes: float | None = None) -> tuple[bool, str]:
-    """Exit only at the planned stop or target (MAX_HOLD_SAFETY_MINUTES is
-    an operational backstop, not a trading rule)."""
+    """Exit at the planned stop (at entry once the break-even stop moved
+    it) or target, or at the position's time exit (its chosen hold; at
+    MAX_HOLD_SAFETY_MINUTES an operational backstop)."""
     stop, target = float(position["setup_stop_price"]), float(position["setup_target_price"])
+    stop_why = (f"breakeven_stop (entry {stop:.6g})" if position.get("setup_breakeven_done")
+                else f"stop_loss (setup invalidation {stop:.6g})")
     if position.get("side") == "short":
         if price >= stop:
-            return True, f"stop_loss (setup invalidation {stop:.6g})"
+            return True, stop_why
         if price <= target:
             return True, f"take_profit (setup target {target:.6g})"
     else:
         if price <= stop:
-            return True, f"stop_loss (setup invalidation {stop:.6g})"
+            return True, stop_why
         if price >= target:
             return True, f"take_profit (setup target {target:.6g})"
-    if held_minutes is not None and held_minutes >= MAX_HOLD_SAFETY_MINUTES:
-        return True, f"max_hold_safety ({held_minutes:.0f} min)"
+    cap = min(float(position.get("setup_max_hold_minutes") or MAX_HOLD_SAFETY_MINUTES), float(MAX_HOLD_SAFETY_MINUTES))
+    if held_minutes is not None and held_minutes >= cap:
+        return True, (f"time_exit ({held_minutes:.0f} min)" if cap < MAX_HOLD_SAFETY_MINUTES
+                      else f"max_hold_safety ({held_minutes:.0f} min)")
     return False, "holding for the planned stop or target"
+
+
+def plan_update(position: dict[str, Any], price: float) -> bool:
+    """The break-even stop: once price is setup_breakeven_r x the trade's
+    risk in profit, its stop moves to the entry price. True when it moved
+    (the caller re-places the exchange bracket)."""
+    be_r = float(position.get("setup_breakeven_r") or 0.0)
+    if be_r <= 0 or position.get("setup_breakeven_done"):
+        return False
+    entry = float(position["entry_price"])
+    stop = float(position.get("setup_initial_stop_price") or position["setup_stop_price"])
+    sign = -1.0 if position.get("side") == "short" else 1.0
+    if sign * (entry - stop) <= 0 or sign * (price - (entry + sign * be_r * abs(entry - stop))) < 0:
+        return False
+    position.update(setup_initial_stop_price=stop, setup_stop_price=entry, setup_breakeven_done=True)
+    return True
 
 
 def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: float, spread_bps: float,
            entry_allowed=None, force_exit=None, max_hold_minutes: int | None = None,
-           leader_df: pd.DataFrame | None = None, leader_symbol: str | None = None) -> pd.DataFrame:
+           leader_df: pd.DataFrame | None = None, leader_symbol: str | None = None,
+           exits: list[tuple[float, float]] | None = None) -> pd.DataFrame:
     """Backtest on real 1-minute candles (ts = candle end): evaluate every
     closed 5m candle, enter at the next 1m open, exit only at the planned
     stop or target (stop first when both fall inside one candle), one
     position at a time, each breakout traded once. entry_allowed(ts) and
-    force_exit(ts) let a market add session rules."""
+    force_exit(ts) let a market add session rules.
+
+    `exits`: several exit rules replayed in the same pass on the same
+    entries (each with its own one-position-at-a-time timeline) -- (hold
+    limit in minutes, break-even trigger in R or 0); each trade then
+    carries its rule as `hold_h` / `be_r`."""
     ctx = prepare(df1, session=SESSION)
     leader_ctx = prepare(leader_df, session=SESSION) if leader_df is not None and not leader_df.empty else None
     d = df1.sort_values("ts").reset_index(drop=True)
     ts1 = d["ts"].to_numpy("int64")
     o, h, lo, c = (d[k].to_numpy(float) for k in ("open", "high", "low", "close"))
-    hold_cap = MAX_HOLD_SAFETY_MINUTES if max_hold_minutes is None else max_hold_minutes
-    trades, busy_until, used = [], 0, set()
+    safety = MAX_HOLD_SAFETY_MINUTES if max_hold_minutes is None else max_hold_minutes
+    rules = [(min(float(m), float(safety)), float(b)) for m, b in exits] if exits else [(float(safety), 0.0)]
+    timelines = [{"busy_until": 0, "used": set()} for _ in rules]
+    trades = []
+    free_from = 0  # the earliest time any exit rule's timeline is free again
     for as_of in ctx.f5.ts:
         as_of = int(as_of)
-        if as_of < busy_until:
+        if as_of < free_from:
             continue
         i = int(np.searchsorted(ts1, as_of, side="right"))
         if i >= len(ts1) or (entry_allowed is not None and not entry_allowed(int(ts1[i]))):
             continue
         r = evaluate(ctx, as_of, sides=sides, fee_rate_roundtrip=fee_rate_roundtrip, spread_bps=spread_bps,
                      leader=leader_ctx, leader_symbol=leader_symbol, require_leader=leader_df is not None)
-        if not r["valid"] or r["setup_id"] in used:
+        if not r["valid"]:
             continue
-        used.add(r["setup_id"])
+        free = [k for k, tl in enumerate(timelines) if as_of >= tl["busy_until"]]
         sign = 1 if r["side"] == "long" else -1
         entry, stop, target = o[i], r["plan"]["stop"], r["plan"]["target"]
         if sign * (entry - stop) <= 0 or sign * (target - entry) <= 0:
             continue
-        exit_px, why, j = None, None, i
-        while j < len(ts1) and ts1[j] - ts1[i] < hold_cap * 60:
-            if (lo[j] <= stop) if sign > 0 else (h[j] >= stop):
-                exit_px, why = stop, "stop"
-                break
-            if (h[j] >= target) if sign > 0 else (lo[j] <= target):
-                exit_px, why = target, "target"
-                break
-            if force_exit is not None and force_exit(int(ts1[j])):
-                exit_px, why = c[j], "session_close"
-                break
-            j += 1
-        if exit_px is None:
-            j = min(j, len(ts1) - 1)
-            exit_px, why = c[j], "max_hold_safety"
-        gross = sign * (exit_px - entry) / entry
-        net = gross - fee_rate_roundtrip - spread_bps / 1e4
-        trades.append({"entry_ts": int(ts1[i]), "exit_ts": int(ts1[j]), "side": r["side"], "setup": r.get("setup"),
-                       "entry": float(entry), "stop": float(stop), "target": float(target), "exit": why,
-                       "gross_return": gross, "net_return": net, "r_multiple": net / (sign * (entry - stop) / entry),
-                       "planned_rr": r["plan"]["rr_net"]})
-        busy_until = int(ts1[j])
+        corr = (r.get("checks") or {}).get("correlation") or {}
+        for k in free:
+            tl = timelines[k]
+            if r["setup_id"] in tl["used"]:
+                continue
+            tl["used"].add(r["setup_id"])
+            hold_cap, be_r = rules[k]
+            be_px = entry + sign * be_r * abs(entry - stop) if be_r > 0 else None
+            stop_now, moved = stop, False
+            exit_px, why, j = None, None, i
+            while j < len(ts1) and ts1[j] - ts1[i] < hold_cap * 60:
+                if (lo[j] <= stop_now) if sign > 0 else (h[j] >= stop_now):
+                    exit_px, why = stop_now, "breakeven" if moved else "stop"
+                    break
+                if (h[j] >= target) if sign > 0 else (lo[j] <= target):
+                    exit_px, why = target, "target"
+                    break
+                if force_exit is not None and force_exit(int(ts1[j])):
+                    exit_px, why = c[j], "session_close"
+                    break
+                # The stop moves from the next candle on (never inside the
+                # candle that reached the trigger: its order is unknown).
+                if be_px is not None and not moved and ((h[j] >= be_px) if sign > 0 else (lo[j] <= be_px)):
+                    stop_now, moved = entry, True
+                j += 1
+            if exit_px is None:
+                j = min(j, len(ts1) - 1)
+                exit_px, why = c[j], "time_exit" if hold_cap < safety else "max_hold_safety"
+            gross = sign * (exit_px - entry) / entry
+            net = gross - fee_rate_roundtrip - spread_bps / 1e4
+            trade = {"entry_ts": int(ts1[i]), "exit_ts": int(ts1[j]), "side": r["side"], "setup": r.get("setup"),
+                     "entry": float(entry), "stop": float(stop), "target": float(target), "exit": why,
+                     "gross_return": gross, "net_return": net, "r_multiple": net / (sign * (entry - stop) / entry),
+                     "planned_rr": r["plan"]["rr_net"], "leader_corr": corr.get("corr"), "leader_dir": corr.get("leader_dir")}
+            if exits:
+                trade.update(hold_h=hold_cap / 60.0, be_r=be_r)
+            trades.append(trade)
+            tl["busy_until"] = int(ts1[j])
+        free_from = min(tl["busy_until"] for tl in timelines)
     return pd.DataFrame(trades)
 
 

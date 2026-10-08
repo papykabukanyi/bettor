@@ -792,10 +792,10 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
     rules = [(min(float(m), float(safety)), float(b)) for m, b in exits] if exits else [(float(safety), 0.0)]
     timelines = [{"busy_until": 0, "used": set()} for _ in rules]
     trades = []
+    free_from = 0  # the earliest time any exit rule's timeline is free again
     for as_of in ctx.f5.ts:
         as_of = int(as_of)
-        free = [k for k, tl in enumerate(timelines) if as_of >= tl["busy_until"]]
-        if not free:
+        if as_of < free_from:
             continue
         i = int(np.searchsorted(ts1, as_of, side="right"))
         if i >= len(ts1) or (entry_allowed is not None and not entry_allowed(int(ts1[i]))):
@@ -804,6 +804,7 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
                      leader=leader_ctx, leader_symbol=leader_symbol, require_leader=leader_df is not None)
         if not r["valid"]:
             continue
+        free = [k for k, tl in enumerate(timelines) if as_of >= tl["busy_until"]]
         sign = 1 if r["side"] == "long" else -1
         entry, stop, target = o[i], r["plan"]["stop"], r["plan"]["target"]
         if sign * (entry - stop) <= 0 or sign * (target - entry) <= 0:
@@ -846,6 +847,7 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
                 trade.update(hold_h=hold_cap / 60.0, be_r=be_r)
             trades.append(trade)
             tl["busy_until"] = int(ts1[j])
+        free_from = min(tl["busy_until"] for tl in timelines)
     return pd.DataFrame(trades)
 
 

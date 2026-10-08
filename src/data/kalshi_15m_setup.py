@@ -98,6 +98,12 @@ NEWS_BLOCK = _env_float("KALSHI_15M_SETUP_NEWS_BLOCK", 0.3)
 # multi-year study (-31% of the price per trade over 307 trades) while
 # buying YES on a long setup broke even: long setups only, unless
 # KALSHI_15M_SETUP_SIDES says otherwise ("long,short").
+# The window's entry and exit style the study chooses between (adopted only
+# when they win on years the choice never saw): the last minute of the
+# window an entry may come in, and how a position leaves -- 0 sold at the
+# planned stop or target, 1 sold only at the target, 2 held to settlement.
+ENTRY_MAX_MINUTE = _env_float("KALSHI_15M_SETUP_ENTRY_MAX_MINUTE", 5.0)
+EXIT_MODE = _env_float("KALSHI_15M_SETUP_EXIT_MODE", 0.0)
 SIDES = tuple(x for x in (s.strip() for s in os.getenv("KALSHI_15M_SETUP_SIDES", "long").split(","))
               if x in ("long", "short")) or ("long",)
 
@@ -1026,7 +1032,7 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
                    leader_symbol: str | None = None, entry_minutes: tuple[int, ...] = (1, 2, 3, 4, 5),
                    min_seconds_left: int = 600, contracts: int = 10, session: str = SESSION,
                    leader_session: str | None = None, minute_average: bool = True,
-                   sides: tuple[str, ...] | None = None) -> pd.DataFrame:
+                   sides: tuple[str, ...] | None = None, variants: list[tuple[float, float]] | None = None) -> pd.DataFrame:
     """Multi-year study of this bot's contract trading on real charts: every
     15-minute window of `spot_1m` (ts = end) is a contract settling YES if
     the window closes at or above its open. Charts, setups, stop/target hits
@@ -1058,8 +1064,14 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
     def quote(p_yes: float) -> tuple[float, float]:
         return min(max(p_yes - half_spread, 0.01), 0.98), max(min(p_yes + half_spread, 0.99), 0.02)
 
+    # `variants`: (last entry minute, exit style) pairs replayed in one pass on
+    # the same windows -- each takes its own first qualifying entry per
+    # window and trades each setup once; trades then carry entry_max_minute
+    # and exit_mode. Without it: entries at entry_minutes, sold at the
+    # planned stop or target (style 0).
+    rules = variants or [(float(max(entry_minutes)), 0.0)]
     cache: dict[int, dict[str, Any]] = {}
-    used: set[str] = set()
+    used: dict[tuple[float, float], set[str]] = {v: set() for v in rules}
     trades: list[dict[str, Any]] = []
     first = int(ts1[0]) // 900 * 900 + 900
     for open_ts in range(first, int(ts1[-1]) - 900 + 1, 900):
@@ -1068,6 +1080,8 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
         if i_open is None or i_close is None:
             continue  # no real print at the window's open or close (session gap)
         strike = ref[i_open]
+        result = "yes" if ref[i_close] >= strike else "no"
+        candidates = []  # (minute, setup, contract plan, vol): computed once, shared by the variants
         for m in entry_minutes:
             t = open_ts + 60 * m
             if close_ts - t < min_seconds_left:
@@ -1080,39 +1094,48 @@ def replay_windows(spot_1m: pd.DataFrame, *, half_spread: float, leader_1m: pd.D
                 cache[as_of] = evaluate(ctx, as_of, sides=sides or SIDES, leader=leader, leader_symbol=leader_symbol,
                                         require_leader=leader_1m is not None)
             setup = cache[as_of]
-            if not setup.get("valid") or setup["setup_id"] in used:
+            if not setup.get("valid"):
                 continue
             vol = float(np.std(np.diff(logc[i_t - 30:i_t + 1]), ddof=1))
             minutes_left = (close_ts - t) / 60.0
             bid, ask = quote(fair_value_yes(cl[i_t], strike, vol, minutes_left))
             cp = contract_plan({**setup, "vol_per_min": vol}, {"yes_bid_dollars": bid, "yes_ask_dollars": ask},
                                seconds_to_close=close_ts - t, strike_underlying=strike)
-            if not cp.get("ok"):
+            if cp.get("ok"):
+                candidates.append((m, setup, cp, vol))
+        for rule in rules:
+            max_minute, mode = rule
+            pick = next(((m, setup, cp, vol) for m, setup, cp, vol in candidates
+                         if m <= max_minute and setup["setup_id"] not in used[rule]), None)
+            if pick is None:
                 continue
-            used.add(setup["setup_id"])
+            m, setup, cp, vol = pick
+            used[rule].add(setup["setup_id"])
             side, price = cp["contract_side"], cp["ask"]
             stop, target, long_ = setup["plan"]["stop"], setup["plan"]["target"], setup["side"] == "long"
             exit_value, how = None, "settled"
-            for k in range(m + 1, 15):
-                j = bar_at(open_ts + 60 * k)
-                if j is None:
-                    continue
-                hit_stop = lo[j] <= stop if long_ else hi[j] >= stop
-                hit_target = hi[j] >= target if long_ else lo[j] <= target
-                if hit_stop or hit_target:
-                    b, a = quote(fair_value_yes(cl[j], strike, vol, (close_ts - ts1[j]) / 60.0))
-                    exit_value = b if side == "yes" else 1.0 - a
-                    how = "stop" if hit_stop else "target"
-                    break
-            result = "yes" if ref[i_close] >= strike else "no"
+            if mode < 2:  # 0: stop or target, 1: target only, 2: held to settlement
+                for k in range(m + 1, 15):
+                    j = bar_at(open_ts + 60 * k)
+                    if j is None:
+                        continue
+                    hit_stop = mode == 0 and (lo[j] <= stop if long_ else hi[j] >= stop)
+                    hit_target = hi[j] >= target if long_ else lo[j] <= target
+                    if hit_stop or hit_target:
+                        b, a = quote(fair_value_yes(cl[j], strike, vol, (close_ts - ts1[j]) / 60.0))
+                        exit_value = b if side == "yes" else 1.0 - a
+                        how = "stop" if hit_stop else "target"
+                        break
             cost = price + fee(price)
             pnl = ((1.0 if result == side else 0.0) - cost) if exit_value is None else (exit_value - fee(exit_value) - cost)
             corr = (setup.get("checks") or {}).get("correlation") or {}
-            trades.append({"entry_ts": int(t), "open_ts": int(open_ts), "minute": m, "side": setup["side"], "contract_side": side,
-                           "setup": setup["setup"], "ask": price, "exit": how, "exit_value": exit_value, "result": result,
-                           "planned_rr": cp["rr"], "pnl_per_contract": pnl, "net_return": pnl / price,
-                           "leader_corr": corr.get("corr"), "leader_dir": corr.get("leader_dir")})
-            break
+            trade = {"entry_ts": int(open_ts + 60 * m), "open_ts": int(open_ts), "minute": m, "side": setup["side"],
+                     "contract_side": side, "setup": setup["setup"], "ask": price, "exit": how, "exit_value": exit_value,
+                     "result": result, "planned_rr": cp["rr"], "pnl_per_contract": pnl, "net_return": pnl / price,
+                     "leader_corr": corr.get("corr"), "leader_dir": corr.get("leader_dir")}
+            if variants:
+                trade.update(entry_max_minute=max_minute, exit_mode=mode)
+            trades.append(trade)
     return pd.DataFrame(trades)
 
 

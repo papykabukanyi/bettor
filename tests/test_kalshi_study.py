@@ -72,13 +72,14 @@ def test_kalshi_study_symbols_are_what_alpaca_charts():
     k15 = job._study_symbols("kalshi15m")  # noqa: SLF001
     assert {"BTC", "ADA", "GOLD", "WTI", "NATGAS"} <= set(k15) and "NEAR" not in k15
     assert (1.5, 3.0) in job.study_grid("perps") and (0.5, 2.0) in job.study_grid("kalshi15m")
-    assert len(job.study_grid("kalshi15m")) == 16 and (2.0, 4.0) in job.study_grid("kalshi15m")
-    # perps: wider stops (to 4x) and, on each, 6 exit rules -- time exits and the break-even stop
-    assert len(job.study_grid("perps")) == 28 and (4.0, 3.0) in job.study_grid("perps")
-    assert len(job.grid_labels("perps")) == 168 and job.default_param("perps") in job.grid_labels("perps")
+    # Thousands of combinations per bot, each around its own method:
+    # stop x target x (time limit x break-even) / (entry window x exit style).
+    assert len(job.grid_labels("perps")) == len(job.grid_labels("crypto")) == 56 * 30 == 1680
+    assert len(job.grid_labels("stocks")) == len(job.grid_labels("options")) == 56 * 20 == 1120
+    assert len(job.grid_labels("kalshi15m")) == 72 * 9 == 648
+    for bot in ("perps", "crypto", "stocks", "options", "kalshi15m"):
+        assert job.default_param(bot) in job.grid_labels(bot), bot
     assert "1.5:3.0:8.0:1.0" in job.grid_labels("perps")
-    # Stocks and options study the same 16 settings as the Kalshi bots, on every prior year.
-    assert job.study_grid("stocks") == job.study_grid("kalshi15m") or len(job.study_grid("stocks")) >= 16
     assert job.MULTIYEAR["stocks"]["lookback"] == 0 and "stocks" in job.ARCHIVE_STUDY_BOTS
 
 

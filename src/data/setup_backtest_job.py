@@ -475,42 +475,59 @@ MULTIYEAR.update({
     "stocks": {"module": "alpaca_setup", "sides": ("long",), "lookback": 0},
     "options": {"module": "alpaca_options_setup", "sides": ("long", "short"), "lookback": 0},
 })
-# The Kalshi bots search a wider plan grid: every stop distance x every
-# minimum reward/risk (16 settings), each crossed with every coin and the
-# entry conditions below -- all scored only on years the choice never saw.
-KALSHI_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
-    "SETUP_MULTIYEAR_KALSHI_PARAM_GRID",
-    ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
-# Perps also searches wider stops (the full-history replay: 70% of trades
-# were stopped out within hours at ~1% while trades still open after a day
-# averaged +1%) and, on each, the exit rules below -- (hold limit in hours,
-# break-even trigger in R; 24 h = the safety backstop, 0 = no break-even).
-PERPS_PARAM_GRID = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
-    "SETUP_MULTIYEAR_PERPS_PARAM_GRID",
-    ",".join(f"{sb}:{rr}" for sb in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0) for rr in (1.5, 2.0, 3.0, 4.0))).split(",") if ":" in item]
-PERPS_EXITS = [tuple(float(x) for x in item.split(":")) for item in os.getenv(
-    "SETUP_MULTIYEAR_PERPS_EXITS", "24:0,8:0,4:0,24:1,8:1,4:1").split(",") if ":" in item]
+# Every archive bot searches a thousand-plus combinations around its own
+# method, each crossed with every symbol and entry condition and scored
+# only on years the choice never saw:
+#   plan     stop distance beyond the invalidation (x 15m ATR) x reward/risk;
+#   exits    for bots that hold positions -- a time limit (hours) x a
+#            break-even stop (moves to entry once the trade is that many R
+#            in profit; 0 = off), all replayed in one pass;
+#   15m      entry window (the last minute of the window an entry may come
+#            in) x exit style (0 sell at the planned stop or target,
+#            1 sell only at the target, 2 hold to settlement).
+STOP_BUFFERS = tuple(float(x) for x in os.getenv("SETUP_STUDY_STOP_BUFFERS", "0.5,1,1.5,2,2.5,3,4,5").split(","))
+TARGETS = tuple(float(x) for x in os.getenv("SETUP_STUDY_TARGETS", "1.25,1.5,2,2.5,3,4,5").split(","))
+TARGETS_15M = tuple(float(x) for x in os.getenv("SETUP_STUDY_TARGETS_15M", "1.25,1.5,1.75,2,2.5,3,3.5,4,5").split(","))
+BOT_EXITS = {
+    bot: [(float(h), float(be)) for h in holds for be in bes]
+    for bot, holds, bes in (("perps", (2, 4, 8, 12, 24), (0, 0.5, 0.75, 1, 1.5, 2)),
+                            ("crypto", (2, 4, 8, 12, 24), (0, 0.5, 0.75, 1, 1.5, 2)),
+                            ("stocks", (0.5, 1, 2, 4, 6.5), (0, 0.5, 1, 1.5)),
+                            ("options", (0.5, 1, 2, 4, 6.5), (0, 0.5, 1, 1.5)))
+}
+VARIANTS_15M = [(float(m), float(x)) for m in (2, 3, 5) for x in (0, 1, 2)]
+# Legacy names kept for anything still reading them.
+KALSHI_PARAM_GRID = [(sb, rr) for sb in STOP_BUFFERS for rr in TARGETS]
+PERPS_PARAM_GRID = KALSHI_PARAM_GRID
+PERPS_EXITS = BOT_EXITS["perps"]
 PARAM_KEYS = ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")
+PARAM_KEYS_15M = ("STOP_BUFFER_ATR15", "MIN_RR", "ENTRY_MAX_MINUTE", "EXIT_MODE")
 
 
 def _param_label(*values: float) -> str:
     return ":".join(str(float(v)) for v in values)
 
 
-def _param_values(param: str | None) -> dict[str, float | None]:
+def _param_values(param: str | None, keys: tuple[str, ...] = PARAM_KEYS) -> dict[str, float | None]:
     """A study setting's label as the bot's parameters ("1.5:3.0" ->
     stop buffer and minimum reward/risk; perps adds hold hours and the
     break-even trigger)."""
     if not param:
         return {"STOP_BUFFER_ATR15": None, "MIN_RR": None}
-    return dict(zip(PARAM_KEYS, (float(x) for x in str(param).split(":"))))
+    return dict(zip(keys, (float(x) for x in str(param).split(":"))))
+
+
+def param_keys(bot: str) -> tuple[str, ...]:
+    return PARAM_KEYS_15M if bot == "kalshi15m" else PARAM_KEYS
 
 
 def grid_labels(bot: str) -> list[str]:
-    """Every setting a bot's study scores, as the labels its trades carry."""
+    """Every combination a bot's study scores, as the labels its trades carry."""
     grid = study_grid(bot)
-    if bot == "perps":
-        return [_param_label(sb, rr, hold, be) for sb, rr in grid for hold, be in PERPS_EXITS]
+    if bot in BOT_EXITS:
+        return [_param_label(sb, rr, hold, be) for sb, rr in grid for hold, be in BOT_EXITS[bot]]
+    if bot == "kalshi15m":
+        return [_param_label(sb, rr, minute, mode) for sb, rr in grid for minute, mode in VARIANTS_15M]
     return [f"{a}:{b}" for a, b in grid]
 
 
@@ -518,8 +535,10 @@ def default_param(bot: str) -> str:
     """The bot's current (untrained) setting, as a study label."""
     import importlib
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
-    if bot == "perps":
+    if bot in BOT_EXITS:
         return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.MAX_HOLD_HOURS, m.BREAKEVEN_R)
+    if bot == "kalshi15m":
+        return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.ENTRY_MAX_MINUTE, m.EXIT_MODE)
     return f"{m.STOP_BUFFER_ATR15}:{m.MIN_RR}"
 
 
@@ -712,26 +731,31 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
     cache = _SettingFreeCache(m).__enter__()
     for setting in grid:
         m.STOP_BUFFER_ATR15, m.MIN_RR = setting
+        exits = [(hold * 60.0, be) for hold, be in BOT_EXITS.get(bot, [])]
         if bot == "perps":
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
                          spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
-                         session=session, leader_session=lead_session,
-                         exits=[(hold * 60.0, be) for hold, be in PERPS_EXITS])
+                         session=session, leader_session=lead_session, exits=exits)
         elif bot == "crypto":
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
-                         spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym)
+                         spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
+                         exits=exits)
         elif bot in ("stocks", "options"):
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
                          spread_bps=cost["spread_bps"], entry_allowed=m.entry_allowed, force_exit=m.must_be_flat,
-                         leader_df=lead if not lead.empty else None, leader_symbol=lead_sym)
+                         leader_df=lead if not lead.empty else None, leader_symbol=lead_sym, exits=exits)
         else:
             t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead if not lead.empty else None,
                                  leader_symbol=lead_sym, session=session, leader_session=lead_session,
-                                 minute_average=m.settles_on_minute_average(sym))
+                                 minute_average=m.settles_on_minute_average(sym), variants=VARIANTS_15M)
         if not t.empty:
             regimes, now = vol_regimes(None, t["entry_ts"].to_numpy("int64"), session, prep=vprep)
-            label = ([_param_label(setting[0], setting[1], hold, be) for hold, be in zip(t["hold_h"], t["be_r"])]
-                     if "hold_h" in t else f"{setting[0]}:{setting[1]}")
+            if "hold_h" in t:
+                label = [_param_label(setting[0], setting[1], hold, be) for hold, be in zip(t["hold_h"], t["be_r"])]
+            elif "entry_max_minute" in t:
+                label = [_param_label(setting[0], setting[1], mm, xm) for mm, xm in zip(t["entry_max_minute"], t["exit_mode"])]
+            else:
+                label = f"{setting[0]}:{setting[1]}"
             frames.append(_annotate(t, sym, news_idx, regimes, us_market_states(spy, t["entry_ts"].to_numpy("int64"))).assign(
                 symbol=sym, param=label, vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
     cache.__exit__()
@@ -848,7 +872,8 @@ def _recent(t: pd.DataFrame, lookback_years: int) -> pd.DataFrame:
 
 
 def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_years: int,
-                          min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30) -> dict[str, Any]:
+                          min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30,
+                          keys: tuple[str, ...] = PARAM_KEYS) -> dict[str, Any]:
     """Training on top of the trained setting and symbols: each year, also
     learn from the prior `lookback_years` which entry conditions lost
     (learn_blocked), and skip them in the year itself. Reports the
@@ -883,7 +908,7 @@ def walk_forward_patterns(trades: pd.DataFrame, *, default_param: str, lookback_
                    and (with_patterns.get("avg") or 0) >= (trained.get("avg") or 0) and positive_years * 2 >= len(years))
     return {"years": years, "trained": trained, "with_patterns": with_patterns,
             "default_every_symbol": _trade_stats(base["net_return"]), "positive_years": positive_years,
-            "test_years": len(years), "by_condition": by_condition, "param_now": _param_values(param_now),
+            "test_years": len(years), "by_condition": by_condition, "param_now": _param_values(param_now, keys),
             "eligible_now": sorted(eligible_now), "blocked_now": blocked_now, "enforce": enforce,
             "rule": (f"setting, symbols and losing entry conditions learned on {_lookback_words(lookback_years)}; "
                      f"a condition is skipped when >= {PATTERN_MIN_TRADES} trades lost with t <= {PATTERN_MAX_T}")}
@@ -934,7 +959,8 @@ def walk_forward_eligibility(trades: pd.DataFrame, *, min_trades: int = ELIGIBIL
 
 
 def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades: int = ELIGIBILITY_MIN_TRADES,
-                         lookback_years: int = ELIGIBILITY_LOOKBACK_YEARS, min_train_trades: int = 30) -> dict[str, Any]:
+                         lookback_years: int = ELIGIBILITY_LOOKBACK_YEARS, min_train_trades: int = 30,
+                         keys: tuple[str, ...] = PARAM_KEYS) -> dict[str, Any]:
     """Each year, choose the plan setting and the eligible symbols from the
     prior `lookback_years` only (the setting whose eligible symbols made the
     most in that window), then trade exactly that on the year itself. The
@@ -968,7 +994,7 @@ def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades
     enforce = bool(trained.get("trades", 0) >= 30 and (trained.get("avg") or 0) > 0
                    and (trained.get("avg") or 0) > (base.get("avg") or 0) and positive_years * 2 >= len(years))
     return {"years": years, "out_of_sample": trained, "default_every_symbol": base, "positive_years": positive_years,
-            "test_years": len(years), "param_now": _param_values(param_now),
+            "test_years": len(years), "param_now": _param_values(param_now, keys),
             "eligible_now": sorted(eligible_now), "enforce": enforce,
             "rule": f"setting and symbols chosen on {_lookback_words(lookback_years)}: >= {min_trades} trades, average net > 0"}
 
@@ -1206,10 +1232,10 @@ def _analyse_multiyear(bot: str, trades: pd.DataFrame, *, symbols: list[str], gr
     result["walk_forward"] = walk_forward_eligibility(base, lookback_years=lookback)
     if "param" in trades and trades["param"].nunique() > 1:
         mark(stage="analysing: trained settings")
-        result["trained"] = walk_forward_trained(trades, default_param=default, lookback_years=lookback)
+        result["trained"] = walk_forward_trained(trades, default_param=default, lookback_years=lookback, keys=param_keys(bot))
     if {"hour_block", "weekday"} <= set(trades.columns):
         mark(stage="analysing: entry conditions")
-        result["patterns"] = walk_forward_patterns(trades, default_param=default, lookback_years=lookback)
+        result["patterns"] = walk_forward_patterns(trades, default_param=default, lookback_years=lookback, keys=param_keys(bot))
     if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
         th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
         result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
@@ -1280,7 +1306,7 @@ def study_grid(bot: str) -> list[tuple[float, float]]:
         return list(PARAM_GRID)
     import importlib
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
-    base = PERPS_PARAM_GRID if bot == "perps" else KALSHI_PARAM_GRID
+    base = [(sb, rr) for sb in STOP_BUFFERS for rr in (TARGETS_15M if bot == "kalshi15m" else TARGETS)]
     return sorted(set(base) | {(float(m.STOP_BUFFER_ATR15), float(m.MIN_RR))})
 
 

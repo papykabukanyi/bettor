@@ -925,6 +925,25 @@ def _setup_news(coin: str) -> tuple[float | None, float | None]:
 WINDOW_SEC = 900
 
 
+def _setup_min_seconds_to_close() -> float:
+    """An entry comes in by the window's minute ENTRY_MAX_MINUTE (the study's
+    entry window; the default minute 5 = 10 minutes left)."""
+    from data import kalshi_15m_setup
+    return max(WINDOW_SEC - float(kalshi_15m_setup.ENTRY_MAX_MINUTE) * 60.0, 0.0)
+
+
+_SETUP_DEFAULTS: dict[str, float] = {}
+
+
+def _setup_defaults() -> dict[str, float]:
+    """The setup module's own plan, entry window and exit style, read once."""
+    if not _SETUP_DEFAULTS:
+        from data import kalshi_15m_setup
+        _SETUP_DEFAULTS.update({key: float(getattr(kalshi_15m_setup, key))
+                                for key in ("STOP_BUFFER_ATR15", "MIN_RR", "ENTRY_MAX_MINUTE", "EXIT_MODE")})
+    return _SETUP_DEFAULTS
+
+
 def _local_window(now: float | None = None) -> tuple[int, int]:
     """The current 15-minute window (open, close) in unix seconds: Kalshi's
     15m series open on the quarter hour."""
@@ -956,10 +975,12 @@ def _evaluate_candidate_setup(
     # the assets with a profitable record and the entry conditions that lost.
     elig = setup_backtest_job.eligibility("kalshi15m")
     enforce = bool(elig and elig.get("enforce"))
-    if enforce and elig.get("params"):
-        for key, value in elig["params"].items():
-            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
-                setattr(kalshi_15m_setup, key, float(value))
+    # Plan, entry window and exit style: the study's choice while it is in
+    # force, the module's own defaults otherwise (never a stale earlier one).
+    chosen = (elig.get("params") or {}) if enforce else {}
+    for key, default in _setup_defaults().items():
+        value = chosen.get(key)
+        setattr(kalshi_15m_setup, key, float(value) if value is not None else default)
     if enforce and coin not in set(elig.get("symbols") or []):
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"ok": False, "reason": "not_eligible", "entry_mode": "setup", "setup_reason": "eligibility",
@@ -980,7 +1001,7 @@ def _evaluate_candidate_setup(
     }
     # The chart is read every cycle (the dashboard's checklist), but an
     # entry needs enough of the window left for the planned move.
-    if seconds_to_close < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
+    if seconds_to_close < _setup_min_seconds_to_close():
         return {"ok": False, "reason": "too_little_time_remaining", "seconds_to_close": seconds_to_close, **info}
     if not setup.get("valid"):
         return {"ok": False, "reason": f"setup_{setup.get('reason')}", **info}
@@ -1011,7 +1032,7 @@ def _evaluate_candidate_setup(
             return {"ok": False, "reason": "window_mismatch", **info}
         live_left = kalshi_15m.seconds_to_close(market)
         seconds_to_close = live_left if live_left is not None else seconds_to_close
-        if seconds_to_close < MIN_SECONDS_TO_CLOSE_FOR_ENTRY:
+        if seconds_to_close < _setup_min_seconds_to_close():
             return {"ok": False, "reason": "too_little_time_remaining", "seconds_to_close": seconds_to_close, **info}
     plan = kalshi_15m_setup.contract_plan(setup, market, seconds_to_close=seconds_to_close,
                                           strike_underlying=float(setup["strike_underlying"]))
@@ -2090,11 +2111,13 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             "entry_feature_snapshot": _clean_feature_snapshot(decision.get("feature_row")),
         }
         if mode == "setup":
+            from data import kalshi_15m_setup
             plan = decision["setup_plan"]
             position.update({
                 "setup_side": decision["setup_side"], "setup_stop_price": plan["stop"], "setup_target_price": plan["target"],
                 "setup_id": decision["setup_id"], "setup_kind": decision["setup"], "setup_rr_net": plan["rr_net"],
                 "setup_strike_underlying": decision["strike_underlying"], "setup_contract_plan": decision["contract_plan"],
+                "setup_exit_mode": float(kalshi_15m_setup.EXIT_MODE),
                 "setup_checks": decision.get("setup_checks"), "entry_underlying_price": decision.get("underlying_price"),
             })
         with _STATE_LOCK:
@@ -2709,9 +2732,16 @@ def _manage_setup_position(position: dict[str, Any], market: dict[str, Any], *, 
     highs = [underlying] + ([float(since["high"].max())] if not since.empty else [])
     plan_pos = kalshi_15m_setup.underlying_plan_position(position)
     worst, best = (max(highs), min(lows)) if plan_pos.get("side") == "short" else (min(lows), max(highs))
-    should, reason = kalshi_15m_setup.plan_exit(plan_pos, worst)
+    mode = int(float(position.get("setup_exit_mode") or 0))  # 0 stop or target, 1 target only, 2 to settlement
+    if mode == 2:
+        checks.append({"coin": coin, "should_exit": False, "reason": "holding to settlement (the study's exit style)",
+                       "underlying_price": underlying})
+        return
+    should, reason = (False, "") if mode == 1 else kalshi_15m_setup.plan_exit(plan_pos, worst)
     if not should:
         should, reason = kalshi_15m_setup.plan_exit(plan_pos, best)
+        if should and mode == 1 and not str(reason).startswith("take_profit"):
+            should, reason = False, "holding through the stop to settlement (target-only exit style)"
     check = {"coin": coin, "should_exit": should, "reason": reason, "underlying_price": underlying,
              "price_source": f"live {tick['kind']}" if tick else "last 1m close",
              "range_since_entry": [min(lows), max(highs)]}
