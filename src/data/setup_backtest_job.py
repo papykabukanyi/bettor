@@ -223,6 +223,15 @@ def _rule_words(bot: str, params: dict[str, Any]) -> str:
     return " · ".join(out)
 
 
+def rule_in_force(bot: str) -> str:
+    """The rule a bot trades right now, in words (the study's choice while it
+    is in force, else the setup defaults)."""
+    elig = eligibility(bot) or {}
+    params = dict(elig.get("params") or {}) if elig.get("enforce") else {}
+    words = _rule_words(bot, params or _param_values(default_param(bot), param_keys(bot)))
+    return words + (" (learned on unseen years)" if elig.get("enforce") else " (setup defaults)")
+
+
 def strategy_board() -> list[dict[str, Any]]:
     """What each bot trades right now and the evidence behind it: the rule
     in force (the study's choice when it won on unseen data, else the

@@ -532,21 +532,23 @@ def _run_alpaca_threads_hourly_status() -> dict[str, Any]:
     of) the real-time trade-entry/exit posts -- never allowed to affect
     trading logic, which is why this reads state read-only and never
     touches order placement."""
+    # Now the bot's decision brief: what it holds and how it exits, the
+    # setups closest to an entry and the rule each waits on (its Alpaca
+    # charts), and the rule in force -- no news.
     try:
+        from data import alpaca_setup, setup_backtest_job
         state = alpaca_strategy._load_state()  # noqa: SLF001
-        now = dt.datetime.now(dt.timezone.utc)
-        positions = []
-        for p in (state.get("positions") or []):
-            levels = alpaca_strategy.position_exit_levels(p)
-            opened_at = dt.datetime.fromisoformat(p["opened_at"])
-            held_minutes = (now - opened_at).total_seconds() / 60.0
-            positions.append({**p, **levels, "ticker": p["symbol"], "held_minutes": held_minutes})
-        realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
-        today_pnl = float(realized_pnl_by_date.get(et_today().isoformat(), 0.0))
-        posted = threads_post.post_hourly_status(positions=positions, today_realized_pnl_usd=today_pnl, market="stocks")
-        return {"ok": True, "posted": posted, "open_position_count": len(positions)}
+        checks = (load_json(ALPACA_LATEST_POSITION_CHECK_FILE, {}) or {}).get("checks") or []
+        prices = {c.get("symbol"): c.get("current_price") for c in checks if c.get("symbol")}
+        positions = threads_post.brief_positions(state.get("positions") or [], prices=prices,
+                                                 default_hold_minutes=alpaca_setup.MAX_HOLD_SAFETY_MINUTES)
+        candidates = threads_post.scan_candidates((load_json(ALPACA_LATEST_CYCLE_FILE, {}) or {}).get("opened"))
+        text = threads_post.format_decision_brief(bot="stocks", positions=positions, candidates=candidates,
+                                                  check_order=alpaca_setup.CHECK_ORDER, rule=setup_backtest_job.rule_in_force("stocks"))
+        posted = threads_post.post_decision_brief(text, market="stocks")
+        return {"ok": True, "posted": posted, "open_position_count": len(positions), "text": text}
     except Exception as exc:
-        logger.warning("[alpaca_server] Threads hourly status post failed: %s", exc)
+        logger.warning("[alpaca_server] Threads decision brief failed: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
@@ -833,16 +835,18 @@ def _ensure_background_jobs_started() -> None:
             # periodically, occasionally bumping into fast_check's own
             # cadence.
             now_utc = dt.datetime.now(dt.timezone.utc)
-            scheduler.add_job(
-                _run_alpaca_threads_trending_news, "interval", minutes=30,
-                id="alpaca_threads_trending_news", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=5),
-            )
-            scheduler.add_job(
-                _run_alpaca_threads_sentiment_snapshot, "interval", minutes=60,
-                id="alpaca_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=10),
-            )
+            if "trending_news" in threads_post.THREADS_POST_KINDS:  # news posts: off unless re-enabled
+                scheduler.add_job(
+                    _run_alpaca_threads_trending_news, "interval", minutes=30,
+                    id="alpaca_threads_trending_news", replace_existing=True, executor="fastcheck",
+                    next_run_time=now_utc + dt.timedelta(minutes=5),
+                )
+            if "sentiment_snapshot" in threads_post.THREADS_POST_KINDS:  # news posts: off unless re-enabled
+                scheduler.add_job(
+                    _run_alpaca_threads_sentiment_snapshot, "interval", minutes=60,
+                    id="alpaca_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                    next_run_time=now_utc + dt.timedelta(minutes=10),
+                )
             scheduler.add_job(
                 _run_alpaca_threads_hourly_status, "interval", hours=1,
                 id="alpaca_threads_hourly_status", replace_existing=True, executor="fastcheck",

@@ -1520,21 +1520,40 @@ def _run_perps_threads_hourly_status() -> dict[str, Any]:
     instead of) the real-time trade-entry/restart posts -- never allowed
     to affect trading logic, which is why this reads state read-only and
     never touches order placement."""
+    # Now the bot's decision brief: what it holds and how it exits, the
+    # setups closest to an entry and the rule each waits on (its Alpaca
+    # charts), and the rule in force -- no news.
     try:
+        from data import perps_setup
         state = perps_strategy._load_state()  # noqa: SLF001
-        now = dt.datetime.now(dt.timezone.utc)
-        positions = []
-        for p in (state.get("positions") or []):
-            levels = perps_strategy.position_exit_levels(p)
-            opened_at = dt.datetime.fromisoformat(p["opened_at"])
-            held_minutes = (now - opened_at).total_seconds() / 60.0
-            positions.append({**p, **levels, "held_minutes": held_minutes})
-        realized_pnl_by_date = state.get("realized_pnl_by_date") or {}
-        today_pnl = float(realized_pnl_by_date.get(et_today().isoformat(), 0.0))
-        posted = threads_post.post_hourly_status(positions=positions, today_realized_pnl_usd=today_pnl)
-        return {"ok": True, "posted": posted, "open_position_count": len(positions)}
+        checks = (load_json(LATEST_POSITION_CHECK_FILE, {}) or {}).get("checks") or []
+        prices = {c.get("ticker"): c.get("current_price") for c in checks if c.get("ticker")}
+        positions = threads_post.brief_positions(state.get("positions") or [], prices=prices,
+                                                 default_hold_minutes=perps_setup.MAX_HOLD_SAFETY_MINUTES)
+        candidates = threads_post.scan_candidates((load_json(LATEST_CYCLE_FILE, {}) or {}).get("candidates"))
+        text = threads_post.format_decision_brief(bot="perps", positions=positions, candidates=candidates,
+                                                  check_order=perps_setup.CHECK_ORDER, rule=setup_backtest_job.rule_in_force("perps"))
+        posted = threads_post.post_decision_brief(text, market="perps")
+        return {"ok": True, "posted": posted, "open_position_count": len(positions), "text": text}
     except Exception as exc:
-        logger.warning("[app_kalshi] Threads hourly status post failed: %s", exc)
+        logger.warning("[app_kalshi] Threads decision brief failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+def _run_kalshi15m_threads_brief() -> dict[str, Any]:
+    """The 15-minute bot's decision brief (same shape as perps')."""
+    try:
+        from data import kalshi_15m_setup
+        state = kalshi_15m_strategy._load_state()  # noqa: SLF001
+        positions = threads_post.brief_positions(state.get("positions") or [], default_hold_minutes=15)
+        candidates = threads_post.scan_candidates((kalshi_15m_strategy.last_scan() or {}).get("checks"))
+        text = threads_post.format_decision_brief(bot="kalshi15m", positions=positions, candidates=candidates,
+                                                  check_order=kalshi_15m_setup.CHECK_ORDER,
+                                                  rule=setup_backtest_job.rule_in_force("kalshi15m") + ", YES only")
+        posted = threads_post.post_decision_brief(text, market="kalshi15m")
+        return {"ok": True, "posted": posted, "open_position_count": len(positions), "text": text}
+    except Exception as exc:
+        logger.warning("[app_kalshi] 15m Threads decision brief failed: %s", exc)
         return {"ok": False, "error": str(exc)}
 
 
@@ -1775,15 +1794,22 @@ def _ensure_background_jobs_started() -> None:
                 id="perps_threads_hourly_status", replace_existing=True, executor="fastcheck",
             )
             scheduler.add_job(
-                _run_perps_threads_trending_news, "interval", minutes=30,
-                id="perps_threads_trending_news", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=5),
+                _run_kalshi15m_threads_brief, "interval", hours=1,
+                id="kalshi15m_threads_brief", replace_existing=True, executor="fastcheck",
+                next_run_time=now_utc + dt.timedelta(minutes=30),
             )
-            scheduler.add_job(
-                _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
-                id="perps_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
-                next_run_time=now_utc + dt.timedelta(minutes=10),
-            )
+            if "trending_news" in threads_post.THREADS_POST_KINDS:  # news posts: off unless re-enabled
+                scheduler.add_job(
+                    _run_perps_threads_trending_news, "interval", minutes=30,
+                    id="perps_threads_trending_news", replace_existing=True, executor="fastcheck",
+                    next_run_time=now_utc + dt.timedelta(minutes=5),
+                )
+            if "sentiment_snapshot" in threads_post.THREADS_POST_KINDS:
+                scheduler.add_job(
+                    _run_perps_threads_sentiment_snapshot, "interval", minutes=60,
+                    id="perps_threads_sentiment_snapshot", replace_existing=True, executor="fastcheck",
+                    next_run_time=now_utc + dt.timedelta(minutes=10),
+                )
             if ENABLE_PERPS_SCHEDULER:
                 scheduler.add_job(
                     _run_perps_fast_check, "interval", seconds=PERPS_FAST_CHECK_SECONDS,

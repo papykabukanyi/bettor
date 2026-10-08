@@ -651,3 +651,14 @@ def note_decision(bot: str, bars: dict[str, Any]) -> None:
     DECISION_TIMING[bot] = {**bars, "decided_at": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(),
                             "after_close_sec": round(now - bars["minute_end"], 1) if bars.get("minute_end") else None}
 
+
+def app_version() -> str:
+    """This deploy's name, e.g. DOZO_V1_1223: the major version, then the
+    build (the deployed git commit count) -- VERSION.json, written by the
+    deploy; DOZO_V1 when it is missing."""
+    try:
+        v = json.loads((Path(__file__).resolve().parents[1] / "VERSION.json").read_text(encoding="utf-8"))
+        return f"{v.get('name', 'DOZO')}_V{int(v.get('major', 1))}" + (f"_{int(v['build'])}" if v.get("build") else "")
+    except (OSError, ValueError, TypeError, KeyError):
+        return "DOZO_V1"
+

@@ -19,6 +19,7 @@ alone cannot post anything on their own.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import os
@@ -35,6 +36,14 @@ logger = logging.getLogger(__name__)
 THREADS_POST_ENABLED = str(os.getenv("THREADS_POST_ENABLED", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
 
 _THREADS_POST_MAX_CHARS = 500
+# What the bots post (user direction 2026-10-08: no news -- only what each
+# bot is thinking, from its own Alpaca charts, to inform its next
+# decisions). THREADS_POST_KINDS can re-enable other kinds by name.
+THREADS_POST_KINDS = {k.strip() for k in os.getenv("THREADS_POST_KINDS", "decision_brief,restart_notice").split(",") if k.strip()}
+
+
+def _allowed(kind: str) -> bool:
+    return THREADS_POST_ENABLED and kind in THREADS_POST_KINDS
 
 # ── Recently-posted-story dedup (real feedback: the same trending headline
 # was posting again on a later 30-minute cycle whenever a slow news day left
@@ -274,7 +283,7 @@ def reply_to_trending_keyword_posts(query: str, *, market: str = "perps", max_re
     best-effort contract. Deliberately capped low (see
     MAX_AUTO_REPLIES_PER_RUN's own comment) since, unlike every other post
     this module makes, a reply reaches someone ELSE's timeline."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("replies"):
         return {"ok": False, "reason": "threads_post_disabled", "replied": []}
     cap = max_replies if max_replies is not None else MAX_AUTO_REPLIES_PER_RUN
     try:
@@ -563,7 +572,7 @@ def post_trade_entry(
     whether it actually posted (False for "not configured" and for any
     real failure alike -- callers should never branch on the failure
     reason, only log it, since this must never affect trading logic)."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("trade_entry"):
         return False
     text = _format_trade_entry_text(
         ticker=ticker, side=side, entry_price=entry_price, take_profit_price=take_profit_price,
@@ -603,7 +612,7 @@ def post_trade_exit(
     counterpart to post_trade_entry() so followers see the full round trip
     (entry AND exit/result), not just entries. Same best-effort, never-
     raise contract as every other post here."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("trade_exit"):
         return False
     text = _format_trade_exit_text(
         ticker=ticker, side=side, entry_price=entry_price, exit_price=exit_price,
@@ -641,7 +650,7 @@ def post_scale_in(
     """Posts one Threads post describing an ADD to an already-open,
     already-winning position (see perps_strategy.USE_SCALE_IN). Same best-
     effort, never-raise contract as post_trade_entry()."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("scale_in"):
         return False
     text = _format_scale_in_text(
         ticker=ticker, side=side, add_price=add_price, add_count=add_count, new_count=new_count,
@@ -682,7 +691,7 @@ def post_partial_exit(
     locked-in-profit stop (see perps_strategy.USE_PARTIAL_EXIT). Deliberately
     NOT post_trade_exit() -- that would misleadingly read as the whole
     position having closed. Same best-effort, never-raise contract."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("partial_exit"):
         return False
     text = _format_partial_exit_text(
         ticker=ticker, side=side, exit_price=exit_price, closed_count=closed_count,
@@ -701,7 +710,7 @@ _RESTART_NOTICE_COOLDOWN_SEC = float(os.getenv("THREADS_RESTART_NOTICE_COOLDOWN_
 _RESTART_NOTICE_HF_TIMEOUT_SEC = int(os.getenv("THREADS_RESTART_NOTICE_HF_TIMEOUT_SEC", "10") or "10")
 
 
-def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
+def post_restart_notice(message: str | None = None) -> bool:
     """Posts a short note once per process boot -- see app_kalshi.py's
     `_ensure_background_jobs_started` for the once-per-boot call site. Same
     best-effort, never-raise contract as post_trade_entry().
@@ -716,12 +725,15 @@ def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
     minutes during this exact migration's own iterative debugging.
     HF-persisted (not just an in-process flag) specifically so the
     cooldown survives the very restarts it's meant to dampen."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("restart_notice"):
         return False
+    from server_common import app_version
+    message = message or app_version()  # e.g. DOZO_V1_1223 (user direction 2026-10-08)
     last = _pull_json_from_hf(_RESTART_NOTICE_HF_FILENAME, timeout_sec=_RESTART_NOTICE_HF_TIMEOUT_SEC) or {}
     last_posted_at = float(last.get("last_posted_at") or 0)
     now = time.time()
-    if (now - last_posted_at) < _RESTART_NOTICE_COOLDOWN_SEC:
+    # A new version always announces itself; the same one is cooled down.
+    if last.get("message") == message and (now - last_posted_at) < _RESTART_NOTICE_COOLDOWN_SEC:
         logger.info(
             "[threads_post] skipping restart notice -- last one was %.1f min ago (cooldown %.0f min)",
             (now - last_posted_at) / 60, _RESTART_NOTICE_COOLDOWN_SEC / 60,
@@ -730,7 +742,7 @@ def post_restart_notice(message: str = "Money Bot has restarted!") -> bool:
     try:
         threads_client.create_and_publish_post(message[:_THREADS_POST_MAX_CHARS])
         _push_json_to_hf(
-            _RESTART_NOTICE_HF_FILENAME, {"last_posted_at": now}, timeout_sec=_RESTART_NOTICE_HF_TIMEOUT_SEC,
+            _RESTART_NOTICE_HF_FILENAME, {"last_posted_at": now, "message": message}, timeout_sec=_RESTART_NOTICE_HF_TIMEOUT_SEC,
             commit_message="update restart-notice cooldown",
         )
         return True
@@ -746,7 +758,7 @@ def post_trade_analysis_summary(summary_text: str, *, market: str = "perps") -> 
     confidence level, and any evidence-gated confidence-threshold
     adjustment that got applied off it. Same best-effort, never-raise
     contract as every other post here."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("trade_analysis"):
         return False
     text = summary_text
     hashtags = _hashtags_for_market(market)
@@ -819,7 +831,7 @@ def post_hourly_status(
     happened -- what position(s) the bot is currently holding (or that
     it's flat), plus today's realized P&L. Same best-effort, never-raise
     contract as the other posts here."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("hourly_status"):
         return False
     text = _format_hourly_status_text(positions=positions, today_realized_pnl_usd=today_realized_pnl_usd, market=market)
     try:
@@ -870,7 +882,7 @@ def post_trending_news(story: dict | None, *, market: str) -> bool:
     Runs every 30 minutes (see app_kalshi.py's/alpaca_server.py's own
     scheduled job) independent of whether any trade happened. Same
     best-effort, never-raise contract as every other post here."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("trending_news"):
         return False
     # Real feedback: the same trending headline was posting again on a later
     # 30-minute cycle whenever a slow news day left it still the top/
@@ -1047,7 +1059,7 @@ def post_trade_entry_chart(
     local dev, where Threads' servers could never reach the image anyway).
     Same best-effort, never-raise contract as every other post here -- a
     chart is a nice-to-have, never allowed to affect trading."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("trade_entry_chart"):
         return False
     try:
         from data import chart_snapshot
@@ -1089,7 +1101,7 @@ def post_trade_exit_chart(
     trip: entry through exit, colored/labeled by the real win/loss result.
     Always attempted (see post_trade_entry_chart's own docstring). Same
     best-effort, never-raise contract as every other post here."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("trade_exit_chart"):
         return False
     try:
         from data import chart_snapshot
@@ -1127,7 +1139,7 @@ def post_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict]) -> bo
     news on its own short TTL. Genuinely different from post_trending_news
     (headlines text) -- this is the per-ticker SCORES, as a picture.
     Same best-effort, never-raise contract as every other post here."""
-    if not THREADS_POST_ENABLED:
+    if not _allowed("sentiment_snapshot"):
         return False
     try:
         from data import chart_snapshot
@@ -1156,3 +1168,164 @@ def post_sentiment_snapshot(*, market: str, ticker_sentiments: list[dict]) -> bo
     except Exception as exc:
         logger.warning("[threads_post] failed to post sentiment snapshot for %s: %s", market, exc)
         return False
+
+
+# ---------------------------------------------------------------------------
+# The decision brief: what a bot is thinking right now, from its own charts
+# ---------------------------------------------------------------------------
+_BOT_LABELS = {"perps": "Kalshi perps", "kalshi15m": "Kalshi 15-min", "stocks": "Alpaca stocks", "crypto": "Alpaca crypto",
+               "options": "Alpaca options"}
+
+
+def _price(v: Any) -> str:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return "--"
+    return f"{v:.2f}" if abs(v) >= 100 else f"{v:.4g}"
+
+
+def format_decision_brief(*, bot: str, positions: list[dict], candidates: list[dict], check_order: list[str],
+                          rule: str | None = None, now: dt.datetime | None = None) -> str:
+    """What the bot is holding and how it will exit, which setups are
+    closest to an entry and the one rule each is still waiting on, and the
+    rule it trades -- all from its last scan of its Alpaca charts."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    lines = [f"{_BOT_LABELS.get(bot, bot)} -- what I'm watching ({now:%H:%M} UTC)"]
+    if positions:
+        for p in positions[:3]:
+            side = p.get("side") or p.get("setup_side") or "long"
+            line = f"Holding {p.get('symbol')} {side} from {_price(p.get('entry_price'))}"
+            if p.get("current_price") is not None:
+                line += f", now {_price(p.get('current_price'))}"
+            if p.get("stop") is not None and p.get("target") is not None:
+                line += f"; out at {_price(p.get('stop'))} (stop) or {_price(p.get('target'))} (target)"
+            if p.get("minutes_left") is not None:
+                line += f", time exit in {int(p['minutes_left'])}m"
+            lines.append(line + ".")
+    else:
+        lines.append("Flat -- no position.")
+
+    def progress(c: dict) -> int:
+        return check_order.index(c["reason"])
+
+    ranked = sorted((c for c in candidates if c.get("reason") in check_order), key=progress, reverse=True)[:3]
+    if ranked:
+        parts = []
+        for c in ranked:
+            met = len([r for r in check_order[1:check_order.index(c["reason"])]])
+            side = f" {c['side']}" if c.get("side") else ""
+            parts.append(f"{c['symbol']}{side}: " + (f"{met} rules met, " if met else "") + f"waiting on {c['reason']}")
+        lines.append("Closest setups: " + "; ".join(parts) + ".")
+    else:
+        lines.append("No setup forming on my charts yet.")
+    if rule:
+        lines.append(f"Rule: {rule}.")
+    text = "\n".join(lines)
+    return text if len(text) <= _THREADS_POST_MAX_CHARS else text[:_THREADS_POST_MAX_CHARS - 1] + "…"
+
+
+BRAIN_SNAPSHOT_EVERY_HOURS = int(os.getenv("THREADS_BRAIN_SNAPSHOT_EVERY_HOURS", "4") or "4")
+
+
+def render_brain_snapshot(text: str, *, bot: str) -> "Path | None":
+    """The decision brief drawn as a card -- a snapshot of the bot's brain."""
+    try:
+        from pathlib import Path
+
+        from PIL import Image, ImageDraw
+
+        from data import chart_snapshot
+        lines = text.split("\n")
+        width, pad = 1080, 64
+        title_font, body_font = chart_snapshot._font(46), chart_snapshot._font(32)  # noqa: SLF001
+        wrapped: list[str] = []
+        for line in lines[1:]:
+            words, cur = line.split(" "), ""
+            for w in words:
+                nxt = (cur + " " + w).strip()
+                if body_font.getlength(nxt) > width - 2 * pad and cur:
+                    wrapped.append(cur)
+                    cur = w
+                else:
+                    cur = nxt
+            wrapped.append(cur)
+            wrapped.append("")
+        height = pad * 2 + 90 + 46 * len(wrapped)
+        img = Image.new("RGB", (width, height), (11, 15, 25))
+        d = ImageDraw.Draw(img)
+        d.text((pad, pad), f"{_BOT_LABELS.get(bot, bot)} -- brain snapshot", font=title_font, fill=(124, 196, 255))
+        y = pad + 90
+        for line in wrapped:
+            d.text((pad, y), line, font=body_font, fill=(231, 236, 245))
+            y += 46
+        chart_snapshot.CHARTS_DIR.mkdir(parents=True, exist_ok=True)
+        path = Path(chart_snapshot.CHARTS_DIR) / f"brain_{bot}_{int(time.time())}.png"
+        img.save(path)
+        return path
+    except Exception as exc:
+        logger.warning("[threads_post] brain snapshot card failed for %s: %s", bot, exc)
+        return None
+
+
+def post_decision_brief(text: str, *, market: str, snapshot: bool | None = None) -> bool:
+    """The bot's decision brief (see format_decision_brief), as text -- and
+    every BRAIN_SNAPSHOT_EVERY_HOURS hours as an image card of the bot's
+    brain with the same words. Best effort."""
+    if not _allowed("decision_brief"):
+        return False
+    if snapshot is None:
+        snapshot = BRAIN_SNAPSHOT_EVERY_HOURS > 0 and dt.datetime.now(dt.timezone.utc).hour % BRAIN_SNAPSHOT_EVERY_HOURS == 0
+    if snapshot:
+        try:
+            from data import chart_snapshot
+            path = render_brain_snapshot(text, bot=market)
+            url = chart_snapshot.public_url_for(path) if path else None
+            if url:
+                threads_client.create_and_publish_image_post(url, text.split("\n")[0][:_THREADS_POST_MAX_CHARS])
+                return True
+        except Exception as exc:
+            logger.warning("[threads_post] brain snapshot post failed for %s, posting text: %s", market, exc)
+    try:
+        threads_client.create_and_publish_post(text)
+        return True
+    except Exception as exc:
+        logger.warning("[threads_post] failed to post the %s decision brief: %s", market, exc)
+        return False
+
+
+def scan_candidates(items: list[dict] | None) -> list[dict]:
+    """A bot's last scan as (symbol, side, the rule it is waiting on)."""
+    import re as _re
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        symbol = it.get("symbol") or it.get("ticker") or it.get("coin")
+        reason = it.get("setup_reason")
+        if not reason:
+            m = _re.search(r"no setup: (\w+) rule not met", str(it.get("reason") or ""))
+            reason = m.group(1) if m else None
+        if symbol and reason:
+            out.append({"symbol": symbol, "side": it.get("setup_side") or it.get("closest_side"), "reason": reason})
+    return out
+
+
+def brief_positions(positions: list[dict] | None, *, default_hold_minutes: float, prices: dict[str, float] | None = None,
+                    now: dt.datetime | None = None) -> list[dict]:
+    """Open positions as the brief shows them: entry, planned stop and
+    target, current price when known, and minutes to the time exit."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = []
+    for p in positions or []:
+        symbol = p.get("symbol") or p.get("ticker") or p.get("coin")
+        left = None
+        try:
+            held = (now - dt.datetime.fromisoformat(str(p["opened_at"]).replace("Z", "+00:00"))).total_seconds() / 60.0
+            left = max(float(p.get("setup_max_hold_minutes") or default_hold_minutes) - held, 0.0)
+        except (KeyError, TypeError, ValueError):
+            pass
+        out.append({"symbol": symbol, "side": p.get("side") or p.get("setup_side"), "entry_price": p.get("entry_price"),
+                    "current_price": (prices or {}).get(symbol), "stop": p.get("setup_stop_price"),
+                    "target": p.get("setup_target_price"), "minutes_left": left})
+    return out

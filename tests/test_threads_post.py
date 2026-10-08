@@ -12,6 +12,15 @@ from data import threads_post
 
 
 @pytest.fixture(autouse=True)
+def _every_post_kind_enabled(monkeypatch):
+    """The live default posts only the decision brief; these tests cover
+    every kind's formatting as if each were enabled."""
+    monkeypatch.setattr(threads_post, "THREADS_POST_KINDS", {
+        "decision_brief", "replies", "trade_entry", "trade_exit", "scale_in", "partial_exit", "restart_notice",
+        "trade_analysis", "hourly_status", "trending_news", "trade_entry_chart", "trade_exit_chart", "sentiment_snapshot"})
+
+
+@pytest.fixture(autouse=True)
 def _isolated_dedup_state(monkeypatch):
     """Both dedup stores (recently-posted news, already-replied-to posts)
     cache in an in-memory module global that's meant to persist for a real
@@ -217,7 +226,7 @@ def test_post_restart_notice_posts_the_default_message(monkeypatch):
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
     result = threads_post.post_restart_notice()
     assert result is True
-    assert posted == ["Money Bot has restarted!"]
+    assert posted == ["DOZO_V1"]
 
 
 def test_post_restart_notice_accepts_a_custom_message(monkeypatch):
@@ -264,7 +273,7 @@ def test_post_restart_notice_posts_again_once_the_cooldown_has_elapsed(monkeypat
     pushed = {}
     monkeypatch.setattr(threads_post, "_push_json_to_hf", lambda filename, data, *, timeout_sec, commit_message: pushed.update(data))
     assert threads_post.post_restart_notice() is True
-    assert posted == ["Money Bot has restarted!"]
+    assert posted == ["DOZO_V1"]
     assert "last_posted_at" in pushed
 
 
@@ -274,7 +283,7 @@ def test_post_restart_notice_posts_on_the_very_first_boot_with_no_prior_record(m
     monkeypatch.setattr(threads_post.threads_client, "create_and_publish_post", lambda text: posted.append(text))
     monkeypatch.setattr(threads_post, "_push_json_to_hf", lambda *a, **k: None)
     assert threads_post.post_restart_notice() is True
-    assert posted == ["Money Bot has restarted!"]
+    assert posted == ["DOZO_V1"]
 
 
 def test_hourly_status_reports_flat_with_no_open_positions(monkeypatch):
@@ -1314,3 +1323,77 @@ def test_post_trending_news_falls_back_to_text_when_the_commentary_card_cannot_b
     result = threads_post.post_trending_news(None, market="crypto")
     assert result is True
     assert "Still the story everyone's watching." in posted[0]
+
+
+def test_only_the_decision_brief_is_posted_by_default(monkeypatch):
+    """User direction: no news -- the bots post only what they are thinking
+    (the decision brief); every other kind is off unless re-enabled."""
+    from data import threads_client, threads_post
+    posted = []
+    monkeypatch.setattr(threads_client, "create_and_publish_post", lambda text, **kw: posted.append(text) or "id")
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", True)
+    monkeypatch.setattr(threads_post, "THREADS_POST_KINDS", {"decision_brief"})  # the live default
+    assert threads_post.post_trending_news({"title": "t", "url": "u"}, market="perps") is False
+    assert threads_post.post_hourly_status(positions=[], today_realized_pnl_usd=0.0) is False
+    assert threads_post.post_sentiment_snapshot(market="perps", ticker_sentiments=[]) is False
+    assert threads_post.post_restart_notice() is False and posted == []
+    assert threads_post.post_decision_brief("brief", market="perps") is True and posted == ["brief"]
+
+
+def test_the_decision_brief_says_what_the_bot_holds_and_waits_on():
+    import datetime as _dt
+    from data import perps_setup, threads_post
+    now = _dt.datetime(2026, 10, 8, 1, 20, tzinfo=_dt.timezone.utc)
+    positions = threads_post.brief_positions(
+        [{"ticker": "KXADAPERP", "side": "short", "entry_price": 0.2635, "opened_at": "2026-10-07T01:37:08+00:00",
+          "setup_stop_price": 0.2665, "setup_target_price": 0.2473}],
+        prices={"KXADAPERP": 0.2577}, default_hold_minutes=1440, now=now)
+    candidates = threads_post.scan_candidates([
+        {"ticker": "KXBTCPERP", "setup_reason": "volume", "setup_side": "long"},
+        {"ticker": "KXETHPERP", "reason": "no setup: trend rule not met"},
+        {"ticker": "KXSOLPERP", "setup_reason": "momentum", "setup_side": "short"}])
+    text = threads_post.format_decision_brief(bot="perps", positions=positions, candidates=candidates,
+                                              check_order=perps_setup.CHECK_ORDER, rule="stop 1.5x 15m range · target 3R", now=now)
+    assert "Holding KXADAPERP short from 0.2635, now 0.2577; out at 0.2665 (stop) or 0.2473 (target), time exit in 17m." in text
+    assert text.index("KXSOLPERP short") < text.index("KXBTCPERP long") < text.index("KXETHPERP")  # closest setups first
+    assert "waiting on momentum" in text and "Rule: stop 1.5x 15m range · target 3R." in text and len(text) <= 500
+
+
+def test_a_restart_announces_the_deployed_version(monkeypatch, tmp_path):
+    """Each deploy is DOZO_V<major>_<build>; a new version always posts,
+    the same version is never posted twice inside the cooldown."""
+    import server_common
+    from data import threads_client
+    posted, store = [], {}
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", True)
+    monkeypatch.setattr(threads_client, "create_and_publish_post", lambda text, **kw: posted.append(text) or "id")
+    monkeypatch.setattr(threads_post, "_pull_json_from_hf", lambda name, **kw: dict(store))
+    monkeypatch.setattr(threads_post, "_push_json_to_hf", lambda name, data, **kw: store.update(data))
+    monkeypatch.setattr(server_common, "app_version", lambda: "DOZO_V1_1223")
+    assert threads_post.post_restart_notice() is True and posted == ["DOZO_V1_1223"]
+    assert threads_post.post_restart_notice() is False  # same version, inside the cooldown
+    monkeypatch.setattr(server_common, "app_version", lambda: "DOZO_V1_1224")
+    assert threads_post.post_restart_notice() is True and posted[-1] == "DOZO_V1_1224"
+
+
+def test_the_version_name_comes_from_the_deploys_version_file(tmp_path, monkeypatch):
+    import json as _json
+    import server_common
+    v = tmp_path / "VERSION.json"
+    v.write_text(_json.dumps({"name": "DOZO", "major": 2, "build": 1301}))
+    monkeypatch.setattr(server_common, "__file__", str(tmp_path / "src" / "server_common.py"))
+    assert server_common.app_version() == "DOZO_V2_1301"
+
+
+def test_a_brain_snapshot_is_the_brief_as_an_image(monkeypatch, tmp_path):
+    from data import chart_snapshot, threads_client
+    monkeypatch.setattr(chart_snapshot, "CHARTS_DIR", tmp_path)
+    monkeypatch.setattr(chart_snapshot, "public_url_for", lambda path: f"https://example/{path.name}")
+    images = []
+    monkeypatch.setattr(threads_client, "create_and_publish_image_post", lambda url, caption, **kw: images.append((url, caption)) or "id")
+    monkeypatch.setattr(threads_post, "THREADS_POST_ENABLED", True)
+    text = "Kalshi perps -- what I'm watching (04:00 UTC)\nFlat -- no position.\nClosest setups: KXBTCPERP long: 3 rules met, waiting on volume."
+    assert threads_post.post_decision_brief(text, market="perps", snapshot=True) is True
+    (url, caption), = images
+    assert url.startswith("https://example/brain_perps_") and caption.startswith("Kalshi perps")
+    assert list(tmp_path.glob("brain_perps_*.png"))
