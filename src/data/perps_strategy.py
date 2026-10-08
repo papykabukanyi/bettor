@@ -2462,6 +2462,15 @@ EXCHANGE_BRACKETS = _env_flag("PERPS_EXCHANGE_BRACKETS", True)
 _PLAN_DEFAULTS = {key: float(getattr(perps_setup, key)) for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")}
 
 
+def setup_risk_per_trade_pct() -> float:
+    """The balance a setup trade risks at its stop: RISK_PER_TRADE_PCT, and
+    RISK_PER_TRADE_PCT_PROVEN while the multi-year study's learned rule is
+    in force (it won on unseen years)."""
+    from data import setup_backtest_job
+    elig = setup_backtest_job.eligibility("perps")
+    return float(perps_setup.RISK_PER_TRADE_PCT_PROVEN if elig and elig.get("enforce") else perps_setup.RISK_PER_TRADE_PCT)
+
+
 def _attach_exchange_bracket(position: dict[str, Any], tick_size: float) -> None:
     """Put the position's planned stop/target on Kalshi (whole position).
     A failure is recorded on the position, never raised -- the bot's own
@@ -3378,12 +3387,13 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
         if setup_plan is not None:
             # Calculate the risk: never more contracts than lose
             # RISK_PER_TRADE_PCT of the balance if the stop is hit.
+            risk_pct = setup_risk_per_trade_pct()
             risk_count = perps_setup.risk_sized_count(
-                balance_usd=available_balance_usd, risk_pct_of_balance=perps_setup.RISK_PER_TRADE_PCT,
+                balance_usd=available_balance_usd, risk_pct_of_balance=risk_pct,
                 price=entry_price, stop=setup_plan["stop"], fee_rate_roundtrip=candidate["setup_fee_rate_roundtrip"],
             )
             sizing_detail = {**sizing_detail, "slice_count": count, "risk_count": risk_count,
-                             "risk_per_trade_pct": perps_setup.RISK_PER_TRADE_PCT}
+                             "risk_per_trade_pct": risk_pct, "binding": "risk" if risk_count < count else "slice"}
             count = min(count, risk_count)
             sizing_detail["count"] = count
         if count < 1:

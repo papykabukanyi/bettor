@@ -97,6 +97,9 @@ MIN_RR = _env_float("PERPS_SETUP_MIN_RR", 3.0)
 MIN_RISK_PCT = _env_float("PERPS_SETUP_MIN_RISK_PCT", 0.001)
 MAX_RISK_PCT = _env_float("PERPS_SETUP_MAX_RISK_PCT", 0.03)
 RISK_PER_TRADE_PCT = _env_float("PERPS_SETUP_RISK_PER_TRADE_PCT", 0.01)  # balance lost if the stop is hit
+# User decision 2026-10-08: risk more per trade only once the multi-year
+# study's learned rule is in force (it won on years it never saw).
+RISK_PER_TRADE_PCT_PROVEN = _env_float("PERPS_SETUP_RISK_PER_TRADE_PCT_PROVEN", 0.02)
 NEWS_BLOCK = _env_float("PERPS_SETUP_NEWS_BLOCK", 0.3)
 
 # 6. Correlation -- the coin's leader is BTC (ETH for BTC itself), read on its Alpaca chart. Over the last
