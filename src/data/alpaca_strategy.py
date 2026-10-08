@@ -330,11 +330,12 @@ def evaluate_setup_candidate(symbol: str, *, company_name: str | None = None,
     # this on and the bot skips the rest.
     from data import setup_backtest_job
     elig = setup_backtest_job.eligibility("stocks")
-    if elig and elig.get("enforce") and elig.get("params"):
-        # The plan settings trained walk-forward on the archive.
-        for key, value in elig["params"].items():
-            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
-                setattr(alpaca_setup, key, float(value))
+    # Plan and exit rule: the study's choice while it is in force, the
+    # module's own defaults otherwise (never a stale earlier choice).
+    chosen = (elig.get("params") or {}) if elig and elig.get("enforce") else {}
+    for key, default in _plan_defaults().items():
+        value = chosen.get(key)
+        setattr(alpaca_setup, key, float(value) if value is not None else default)
     if elig and elig.get("enforce") and symbol not in set(elig.get("symbols") or []):
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"symbol": symbol, "entry_system": "setup", "should_enter": False, "score": 0.0, "model_ok": False,
@@ -400,6 +401,18 @@ def _learned_losing_condition(elig: dict[str, Any] | None, symbol: str, side: st
         leader_dir=corr.get("leader_dir"), vol_regime=regime,
         us_market=setup_backtest_job.us_market_now() if "us_market" in blocked else None)
     return setup_backtest_job.blocked_reason(blocked, result["entry_conditions"])
+
+
+_PLAN_DEFAULTS: dict[str, float] = {}
+
+
+def _plan_defaults() -> dict[str, float]:
+    """The setup module's own plan and exit rule, read once."""
+    if not _PLAN_DEFAULTS:
+        from data import alpaca_setup
+        _PLAN_DEFAULTS.update({key: float(getattr(alpaca_setup, key))
+                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")})
+    return _PLAN_DEFAULTS
 
 
 def decide_exit(
@@ -1289,10 +1302,15 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                                    "reason": f"evidence gate closed: {evidence_gate['reason']}",
                                    **{k: candidate.get(k) for k in ("setup_reason", "setup_checks", "setup_plan", "setup")}})
                     continue
+                from data import alpaca_setup
                 setup_fields = {
                     "entry_system": "setup", "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
                     "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"], "setup_rr_net": setup_plan["rr_net"],
                     "setup_risk_pct": setup_plan["risk_pct"], "setup_checks": candidate.get("setup_checks"),
+                    # The exit rule this trade was opened under.
+                    "setup_initial_stop_price": setup_plan["stop"],
+                    "setup_max_hold_minutes": float(alpaca_setup.MAX_HOLD_HOURS) * 60.0,
+                    "setup_breakeven_r": float(alpaca_setup.BREAKEVEN_R),
                 }
             else:
                 entry_price = row["current_price"]
@@ -1524,6 +1542,17 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                     breakout_pct_b = promising_row.get("bb_pct_b")
                     sentiment_score_value = promising_row.get("sentiment_score")
 
+            from data import alpaca_setup
+            if alpaca_setup.has_plan(position) and alpaca_setup.plan_update(position, current_price):
+                # Break-even reached: the stop is the entry price -- in the
+                # bracket on Alpaca too (the bot's own check covers a failure).
+                logger.info("[alpaca_strategy] %s break-even: stop moved to entry %.2f", symbol, position["setup_stop_price"])
+                if position.get("order_id") and not effective_dry_run:
+                    try:
+                        from data import alpaca_client
+                        alpaca_client.move_bracket_stop(position["order_id"], position["setup_stop_price"])
+                    except Exception as exc:
+                        logger.warning("[alpaca_strategy] could not move %s's bracket stop: %s", symbol, exc)
             should_exit, reason = decide_exit(
                 position, current_price,
                 dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,

@@ -317,11 +317,12 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
     # this on and the bot skips the rest.
     from data import setup_backtest_job
     elig = setup_backtest_job.eligibility("options")
-    if elig and elig.get("enforce") and elig.get("params"):
-        # The plan settings trained walk-forward on the archive.
-        for key, value in elig["params"].items():
-            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
-                setattr(alpaca_options_setup, key, float(value))
+    # Plan and exit rule: the study's choice while it is in force, the
+    # module's own defaults otherwise (never a stale earlier choice).
+    chosen = (elig.get("params") or {}) if elig and elig.get("enforce") else {}
+    for key, default in _plan_defaults().items():
+        value = chosen.get(key)
+        setattr(alpaca_options_setup, key, float(value) if value is not None else default)
     if elig and elig.get("enforce") and symbol not in set(elig.get("symbols") or []):
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"symbol": symbol, "entry_system": "setup", "should_enter": False, "score": 0.0, "model_ok": False,
@@ -557,6 +558,18 @@ def _effective_max_hold_minutes(position: dict[str, Any], *, opened_at: dt.datet
     if total_lifetime_minutes <= 0:
         return float(MAX_HOLD_MINUTES)
     return max(float(MAX_HOLD_MINUTES), total_lifetime_minutes * MAX_HOLD_FRACTION_OF_DTE)
+
+
+_PLAN_DEFAULTS: dict[str, float] = {}
+
+
+def _plan_defaults() -> dict[str, float]:
+    """The setup module's own plan and exit rule, read once."""
+    if not _PLAN_DEFAULTS:
+        from data import alpaca_options_setup
+        _PLAN_DEFAULTS.update({key: float(getattr(alpaca_options_setup, key))
+                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")})
+    return _PLAN_DEFAULTS
 
 
 def decide_exit(
@@ -1737,6 +1750,10 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"], "setup_rr_net": setup_plan["rr_net"],
                     "setup_risk_pct": setup_plan["risk_pct"], "setup_checks": candidate.get("setup_checks"),
                     "entry_underlying_price": underlying_now,
+                    # The exit rule this trade was opened under (on the underlying).
+                    "setup_initial_stop_price": setup_plan["stop"],
+                    "setup_max_hold_minutes": float(alpaca_options_setup.MAX_HOLD_HOURS) * 60.0,
+                    "setup_breakeven_r": float(alpaca_options_setup.BREAKEVEN_R),
                 }
 
             if ENTRY_STRATEGY == "debit_spread":
@@ -2079,6 +2096,13 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         breakout_pct_b = promising_row.get("bb_pct_b")
                         sentiment_score_value = promising_row.get("sentiment_score")
 
+                from data import alpaca_options_setup
+                if alpaca_options_setup.has_plan(position) and underlying_price is not None:
+                    plan_pos = alpaca_options_setup.underlying_plan_position(position)
+                    if plan_pos.get("entry_price") is not None and alpaca_options_setup.plan_update(plan_pos, underlying_price):
+                        position.update({k: plan_pos[k] for k in ("setup_stop_price", "setup_initial_stop_price", "setup_breakeven_done")})
+                        logger.info("[alpaca_options_strategy] %s break-even: underlying stop moved to entry %.4f",
+                                    contract_symbol, position["setup_stop_price"])
                 should_exit, reason = decide_exit(
                     position, current_price,
                     dollar_volume_z=dollar_volume_z, momentum_pct=momentum_pct,

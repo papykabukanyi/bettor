@@ -101,6 +101,26 @@ def _trading_delete(path: str) -> dict[str, Any]:
     return resp.json() if resp.content else {}
 
 
+def _trading_patch(path: str, *, json_body: dict[str, Any]) -> dict[str, Any]:
+    resp = requests.patch(
+        f"{TRADING_BASE_URL}{path}", headers={**_auth_headers(), "Content-Type": "application/json"},
+        json=json_body, timeout=TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
+
+
+def move_bracket_stop(parent_order_id: str, stop_price: float) -> dict[str, Any]:
+    """Move a bracket order's stop-loss leg (PATCH /v2/orders/{leg id}) --
+    e.g. to the entry price once a break-even stop triggers."""
+    order = get_order(parent_order_id, nested=True)
+    legs = [leg for leg in order.get("legs") or [] if leg.get("type") in ("stop", "stop_limit")
+            and leg.get("status") in ("new", "accepted", "held", "pending_new", "accepted_for_bidding")]
+    if not legs:
+        raise RuntimeError(f"no open stop leg on bracket {parent_order_id}")
+    return _trading_patch(f"/v2/orders/{legs[0]['id']}", json_body={"stop_price": f"{float(stop_price):.2f}"})
+
+
 def _data_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
     resp = _get_with_retry(f"{DATA_BASE_URL}{path}", headers=_auth_headers(), params=params or {})
     resp.raise_for_status()

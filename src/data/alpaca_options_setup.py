@@ -950,7 +950,9 @@ def underlying_plan_position(position: dict[str, Any]) -> dict[str, Any]:
     """An option position's setup plan, in the shape plan_exit/exit_levels
     read: the underlying's side, stop and target."""
     return {"side": position.get("setup_side", "long"), "setup_stop_price": position["setup_stop_price"],
-            "setup_target_price": position["setup_target_price"]}
+            "setup_target_price": position["setup_target_price"], "entry_price": position.get("entry_underlying_price"),
+            **{k: position.get(k) for k in ("setup_initial_stop_price", "setup_max_hold_minutes", "setup_breakeven_r",
+                                             "setup_breakeven_done")}}
 
 
 def strategy_card() -> dict[str, Any]:

@@ -343,10 +343,12 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
     study_symbol = f"{symbol.split('/')[0].upper()}/USD"
     elig = setup_backtest_job.eligibility("crypto")
     enforce = bool(elig and elig.get("enforce"))
-    if enforce and elig.get("params"):
-        for key, value in elig["params"].items():
-            if value is not None and key in ("STOP_BUFFER_ATR15", "MIN_RR"):
-                setattr(alpaca_crypto_setup, key, float(value))
+    # Plan and exit rule: the study's choice while it is in force, the
+    # module's own defaults otherwise (never a stale earlier choice).
+    chosen = (elig.get("params") or {}) if enforce else {}
+    for key, default in _plan_defaults().items():
+        value = chosen.get(key)
+        setattr(alpaca_crypto_setup, key, float(value) if value is not None else default)
     if enforce and study_symbol not in set(elig.get("symbols") or []):
         detail = f"no profitable multi-year record ({elig.get('rule')})"
         return {"symbol": symbol, "entry_system": "setup", "should_enter": False, "score": 0.0, "model_ok": False,
@@ -556,6 +558,18 @@ def adaptive_exit_pcts(entry_volatility_30: float | None) -> dict[str, float]:
         "take_profit_pct": take_profit, "stop_loss_pct": stop_loss,
         "quick_profit_pct": take_profit * 0.9, "volatility_quick_profit_pct": take_profit * 0.8,
     }
+
+
+_PLAN_DEFAULTS: dict[str, float] = {}
+
+
+def _plan_defaults() -> dict[str, float]:
+    """The setup module's own plan and exit rule, read once."""
+    if not _PLAN_DEFAULTS:
+        from data import alpaca_crypto_setup
+        _PLAN_DEFAULTS.update({key: float(getattr(alpaca_crypto_setup, key))
+                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")})
+    return _PLAN_DEFAULTS
 
 
 def decide_exit(
@@ -1604,10 +1618,15 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
             # used the adaptive ones, silently showing a misleading price.
             setup_fields: dict[str, Any] = {}
             if setup_plan is not None:
+                from data import alpaca_crypto_setup
                 setup_fields = {
                     "entry_system": "setup", "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
                     "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"], "setup_rr_net": setup_plan["rr_net"],
                     "setup_risk_pct": setup_plan["risk_pct"], "setup_checks": candidate.get("setup_checks"),
+                    # The exit rule this trade was opened under.
+                    "setup_initial_stop_price": setup_plan["stop"],
+                    "setup_max_hold_minutes": float(alpaca_crypto_setup.MAX_HOLD_HOURS) * 60.0,
+                    "setup_breakeven_r": float(alpaca_crypto_setup.BREAKEVEN_R),
                 }
             levels = position_exit_levels({"entry_price": entry_price, "entry_volatility_30": row.get("volatility_30"), **setup_fields})
             order_id = None
@@ -1799,6 +1818,9 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                         except Exception as exc:
                             logger.debug("[alpaca_crypto_strategy] pre-exit correlation study failed for %s: %s", symbol, exc)
 
+                from data import alpaca_crypto_setup
+                if alpaca_crypto_setup.has_plan(position) and alpaca_crypto_setup.plan_update(position, current_price):
+                    logger.info("[alpaca_crypto_strategy] %s break-even: stop moved to entry %.6g", symbol, position["setup_stop_price"])
                 should_exit, reason = decide_exit(
                     position, current_price, velocity_pct_per_min=velocity,
                     current_volatility=current_volatility, now=now,

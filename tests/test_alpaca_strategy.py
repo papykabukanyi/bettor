@@ -1690,3 +1690,28 @@ def test_a_position_closed_by_its_alpaca_bracket_is_booked_not_dropped(monkeypat
     assert state["realized_pnl_by_date"]["2026-10-05"] == -8.0
     strat._reconcile_positions_with_exchange(state)  # noqa: SLF001 -- never booked twice
     assert len(state["trade_log"]) == 1
+
+
+def test_a_stock_trade_follows_the_study_chosen_exit_rule(monkeypatch):
+    """While the study's choice is in force the stock bot trades its stop,
+    target, time limit and break-even; at break-even the bracket's stop
+    on Alpaca moves to the entry too."""
+    from data import alpaca_client, alpaca_setup, setup_backtest_job
+    for key, value in strat._plan_defaults().items():  # noqa: SLF001
+        monkeypatch.setattr(alpaca_setup, key, value)
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {
+        "enforce": True, "symbols": ["COST"], "rule": "r",
+        "params": {"STOP_BUFFER_ATR15": 2.0, "MIN_RR": 1.5, "MAX_HOLD_HOURS": 2.0, "BREAKEVEN_R": 1.0}})
+    monkeypatch.setattr(alpaca_setup, "live_setup", lambda symbol, **kw: {"valid": False, "reason": "trend", "checks": {}})
+    strat.evaluate_setup_candidate("COST")
+    assert (alpaca_setup.MAX_HOLD_HOURS, alpaca_setup.BREAKEVEN_R, alpaca_setup.STOP_BUFFER_ATR15) == (2.0, 1.0, 2.0)
+    pos = {"symbol": "COST", "entry_price": 100.0, "setup_stop_price": 99.0, "setup_target_price": 103.0, "setup_breakeven_r": 1.0,
+           "setup_max_hold_minutes": 120.0, "side": "long"}
+    assert alpaca_setup.plan_update(pos, 101.0) and pos["setup_stop_price"] == 100.0
+    assert alpaca_setup.plan_exit(pos, 100.5, held_minutes=121)[1].startswith("time_exit")
+    calls = []
+    monkeypatch.setattr(alpaca_client, "get_order", lambda oid, nested=False: {"legs": [
+        {"id": "tp", "type": "limit", "status": "new"}, {"id": "sl", "type": "stop", "status": "new"}]})
+    monkeypatch.setattr(alpaca_client, "_trading_patch", lambda path, json_body: calls.append((path, json_body)) or {})
+    alpaca_client.move_bracket_stop("parent", 100.0)
+    assert calls == [("/v2/orders/sl", {"stop_price": "100.00"})]

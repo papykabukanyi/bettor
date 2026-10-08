@@ -2395,3 +2395,12 @@ def test_setup_entry_is_skipped_when_the_bet_is_already_open_across_bots(setup_m
     assert result["opened"][0]["action"] == "skipped_correlated_exposure"
     assert seen == {"symbol": "AAPL", "direction": "long", "bot": "options"}
     assert strat._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_an_option_trades_break_even_on_its_underlying():
+    from data import alpaca_options_setup
+    pos = {"setup_side": "long", "setup_stop_price": 99.0, "setup_target_price": 104.0, "entry_underlying_price": 100.0,
+           "setup_breakeven_r": 1.0, "setup_max_hold_minutes": 60.0}
+    plan_pos = alpaca_options_setup.underlying_plan_position(pos)
+    assert alpaca_options_setup.plan_update(plan_pos, 101.2) and plan_pos["setup_stop_price"] == 100.0
+    assert alpaca_options_setup.plan_exit(plan_pos, 100.5, held_minutes=61)[1].startswith("time_exit")

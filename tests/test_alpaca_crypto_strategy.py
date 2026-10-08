@@ -1445,3 +1445,18 @@ def test_setup_entry_is_skipped_when_the_bet_is_already_open_across_bots(setup_m
     assert result["opened"][0]["action"] == "skipped_correlated_exposure"
     assert seen == {"symbol": "BTC", "direction": "long", "bot": "crypto"}
     assert strat._load_state()["positions"] == []  # noqa: SLF001
+
+
+def test_a_crypto_trade_follows_the_study_chosen_exit_rule(monkeypatch):
+    from data import alpaca_crypto_setup, setup_backtest_job
+    for key, value in strat._plan_defaults().items():  # noqa: SLF001
+        monkeypatch.setattr(alpaca_crypto_setup, key, value)
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {
+        "enforce": True, "symbols": ["BTC/USD"], "rule": "r",
+        "params": {"STOP_BUFFER_ATR15": 3.0, "MIN_RR": 2.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 0.75}})
+    monkeypatch.setattr(alpaca_crypto_setup, "live_setup", lambda symbol, **kw: {"valid": False, "reason": "trend", "checks": {}})
+    strat.evaluate_setup_candidate("BTC/USD")
+    assert (alpaca_crypto_setup.MAX_HOLD_HOURS, alpaca_crypto_setup.BREAKEVEN_R) == (8.0, 0.75)
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: None)
+    strat.evaluate_setup_candidate("BTC/USD")
+    assert alpaca_crypto_setup.BREAKEVEN_R == strat._plan_defaults()["BREAKEVEN_R"]  # noqa: SLF001 -- defaults back
