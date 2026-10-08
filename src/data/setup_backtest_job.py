@@ -220,16 +220,24 @@ def _rule_words(bot: str, params: dict[str, Any]) -> str:
         out.append(f"hold <= {params['MAX_HOLD_HOURS']:g} h")
     if params.get("BREAKEVEN_R"):
         out.append(f"break-even at {params['BREAKEVEN_R']:g}R")
+    if params.get("ENTRY_MAX_MINUTE") is not None:
+        out.append(f"enter by minute {params['ENTRY_MAX_MINUTE']:g}")
+    if params.get("EXIT_MODE") is not None:
+        out.append({0: "sell at stop or target", 1: "sell only at target", 2: "hold to settlement"}.get(
+            int(params["EXIT_MODE"]), f"exit mode {params['EXIT_MODE']:g}"))
     return " · ".join(out)
 
 
 def rule_in_force(bot: str) -> str:
     """The rule a bot trades right now, in words (the study's choice while it
-    is in force, else the setup defaults)."""
+    is in force, else the setup defaults; a walk-forward win keeps the
+    defaults and learns only which symbols to trade)."""
     elig = eligibility(bot) or {}
     params = dict(elig.get("params") or {}) if elig.get("enforce") else {}
     words = _rule_words(bot, params or _param_values(default_param(bot), param_keys(bot)))
-    return words + (" (learned on unseen years)" if elig.get("enforce") else " (setup defaults)")
+    if not elig.get("enforce"):
+        return words + " (setup defaults)"
+    return words + (" (learned on unseen years)" if params else " (setup defaults, symbols learned on unseen years)")
 
 
 def strategy_board() -> list[dict[str, Any]]:
@@ -243,7 +251,7 @@ def strategy_board() -> list[dict[str, Any]]:
         enforce = bool(elig.get("enforce"))
         params = dict(elig.get("params") or {}) if enforce else {}
         if not params:
-            params = _param_values(default_param(bot))
+            params = _param_values(default_param(bot), param_keys(bot))
         row: dict[str, Any] = {"bot": bot, "source": elig.get("source") if enforce else "defaults", "rule": _rule_words(bot, params),
                                "params": params, "symbols": elig.get("symbols") if enforce else "all",
                                "blocked": (elig.get("blocked") or {}) if enforce else {}}

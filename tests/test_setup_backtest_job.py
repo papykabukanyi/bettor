@@ -405,6 +405,29 @@ def test_the_strategy_board_shows_each_bots_rule_and_evidence(monkeypatch):
     assert board["kalshi15m"]["replay"]["trades"] == 19
 
 
+def test_the_15m_rule_reads_as_its_own_entry_window_and_exit_style(monkeypatch):
+    """The 15m bot's settings are its entry window and exit style, never
+    another bot's hold limit; a walk-forward win keeps the defaults and only
+    learns which symbols to trade."""
+    from data import kalshi_15m_setup
+    monkeypatch.setattr(kalshi_15m_setup, "ENTRY_MAX_MINUTE", 5.0)
+    monkeypatch.setattr(kalshi_15m_setup, "EXIT_MODE", 0.0)
+    walk_forward = {"enforce": True, "source": "walk_forward", "symbols": ["BTC", "GOLD"], "params": None}
+    monkeypatch.setattr(job, "eligibility", lambda bot: walk_forward if bot == "kalshi15m" else None)
+    monkeypatch.setattr(job, "latest", lambda bot: {})
+    row = {r["bot"]: r for r in job.strategy_board()}["kalshi15m"]
+    assert "enter by minute 5 · sell at stop or target" in row["rule"] and "hold" not in row["rule"]
+    assert row["source"] == "walk_forward" and row["symbols"] == ["BTC", "GOLD"]
+    assert job.rule_in_force("kalshi15m").endswith("(setup defaults, symbols learned on unseen years)")
+    trained = {"enforce": True, "source": "trained", "symbols": ["BTC"],
+               "params": {"STOP_BUFFER_ATR15": 1.0, "MIN_RR": 3.0, "ENTRY_MAX_MINUTE": 2.0, "EXIT_MODE": 2.0}}
+    monkeypatch.setattr(job, "eligibility", lambda bot: trained)
+    assert job.rule_in_force("kalshi15m") == ("stop 1x 15m range · target 3R · enter by minute 2 · hold to settlement"
+                                              " (learned on unseen years)")
+    monkeypatch.setattr(job, "eligibility", lambda bot: None)
+    assert job.rule_in_force("perps").endswith("(setup defaults)")
+
+
 def test_a_running_study_reports_live_progress_and_a_finish_estimate():
     """The dashboard's progress bar: finished symbols plus the ones in flight
     (each worker reports after every setting; the first pass weighs most),
