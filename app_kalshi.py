@@ -2652,7 +2652,7 @@ def api_kalshi_15m_diagnose_entries():
             per_coin[coin] = {"coin_trust": coin_trust, "decision": decision}
         return jsonify({
             "ok": True, "entry_mode": mode, "current_et_hour": current_et_hour, "win_streak_cooldown": win_streak_cooldown,
-            "crypto_sequential_gate": kalshi_15m_strategy.compute_crypto_sequential_gate(gate_state),
+            "crypto_sequential_gate": kalshi_15m_strategy.effective_crypto_sequential_gate(gate_state),
             "hour_trust": hour_trust, "open_position_count": len(state.get("positions") or []), "per_coin": per_coin,
         })
     except Exception as exc:

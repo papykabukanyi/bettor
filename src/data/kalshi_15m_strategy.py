@@ -568,6 +568,16 @@ def compute_crypto_sequential_gate(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def effective_crypto_sequential_gate(state: dict[str, Any]) -> dict[str, Any]:
+    """The crypto gate as entries actually see it: in setup mode the setup
+    alone decides, so a loss never waits on a model retrain (one crypto
+    position at a time still holds)."""
+    gate = compute_crypto_sequential_gate(state)
+    if entry_mode() == "setup" and gate.get("reason") == "crypto_loss_retrain_pending":
+        return {"open": True, "reason": "setup_mode_no_retrain_gate"}
+    return gate
+
+
 def apply_crypto_loss_retrain_result(*, real_trade_count: int, retrain_ok: bool) -> dict[str, Any]:
     """Records that the retrain app_kalshi._run_kalshi_15m_cycle runs the
     moment compute_crypto_sequential_gate reports retrain_pending=True has
@@ -1794,8 +1804,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             # coin, one crypto position at a time, metals' concurrency cap.
             hour_trust = {**hour_trust, "trusted": True, "reason": "not_applied_in_setup_mode"}
             win_streak_cooldown = {**win_streak_cooldown, "active": False}
-            if crypto_gate.get("reason") == "crypto_loss_retrain_pending":
-                crypto_gate = {"open": True, "reason": "setup_mode_no_retrain_gate"}
+            crypto_gate = effective_crypto_sequential_gate(state)
 
     evidence_gate = {"open": True, "gated": False, "reason": "not_setup_mode"}
     if mode == "setup":
@@ -2202,7 +2211,7 @@ def effective_strategy_params(state: dict[str, Any] | None = None) -> dict[str, 
         "model_confidence_min": tuning.get("model_confidence_min", MODEL_CONFIDENCE_MIN),
         "position_size_pct": tuning.get("position_size_pct", POSITION_SIZE_PCT),
         "max_concurrent_positions": compute_graduated_max_concurrent_positions(metals_trade_log),
-        "crypto_sequential_gate": compute_crypto_sequential_gate(state),
+        "crypto_sequential_gate": effective_crypto_sequential_gate(state),
     }
 
 

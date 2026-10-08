@@ -92,7 +92,10 @@ def get_market_session() -> dict[str, Any]:
         if bool(clock.get("is_open")):
             return {"session": "regular", "is_open": True, "source": "alpaca"}
         fallback = _fallback_market_session()
-        return {"session": fallback["session"], "is_open": False, "source": "alpaca"}
+        # Closed during the regular hours' clock time (a holiday or an
+        # early close) is closed, never "regular".
+        session = "closed" if fallback["session"] == "regular" else fallback["session"]
+        return {"session": session, "is_open": False, "source": "alpaca"}
     except Exception as exc:
         logger.info("[alpaca_data] clock lookup failed, using ET fallback: %s", exc)
         return _fallback_market_session()

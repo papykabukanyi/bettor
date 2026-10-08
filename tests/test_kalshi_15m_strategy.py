@@ -1393,17 +1393,23 @@ def test_effective_strategy_params_accepts_an_already_loaded_state():
     assert params["model_confidence_min"] == 0.7
 
 
-def test_effective_strategy_params_reports_the_crypto_gate_and_stays_metals_scoped():
+def test_effective_strategy_params_reports_the_crypto_gate_and_stays_metals_scoped(monkeypatch):
     # A crypto LOSS must never move max_concurrent_positions (a metals-
     # only figure now, see _market_of's own comment) -- but it SHOULD
-    # show up in the separate crypto_sequential_gate field.
-    state = {
-        "positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False}],
-    }
-    params = kalshi_15m_strategy.effective_strategy_params(state)
+    # show up in the separate crypto_sequential_gate field, as entries
+    # see it: the model modes wait for a retrain, the setup mode doesn't.
+    def state(mode):
+        return {"positions": [], "trade_log": [{"coin": "BTC", "realized_pnl_usd": -1.0, "dry_run": False, "entry_mode": mode}]}
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "ev")
+    params = kalshi_15m_strategy.effective_strategy_params(state("ev"))
     assert params["max_concurrent_positions"] == kalshi_15m_strategy.GRADUATED_CONCURRENCY_START_SLOTS
     assert params["crypto_sequential_gate"]["open"] is False
     assert params["crypto_sequential_gate"]["reason"] == "crypto_loss_retrain_pending"
+    monkeypatch.setattr(kalshi_15m_strategy, "ENTRY_MODE", "setup")
+    gate = kalshi_15m_strategy.effective_strategy_params(state("setup"))["crypto_sequential_gate"]
+    assert gate == {"open": True, "reason": "setup_mode_no_retrain_gate"}
+    held = {"positions": [{"coin": "ETH"}], "trade_log": state("setup")["trade_log"]}
+    assert kalshi_15m_strategy.effective_crypto_sequential_gate(held)["reason"] == "crypto_position_already_open"
 
 
 def test_scan_and_enter_reads_the_correlation_override_from_state_tuning(monkeypatch):
