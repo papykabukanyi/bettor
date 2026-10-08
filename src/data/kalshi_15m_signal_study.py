@@ -425,9 +425,13 @@ _latest_cache: dict[str, Any] = {}
 
 def latest() -> dict[str, Any] | None:
     """The latest study (local result, else the published one on HF;
-    cached ten minutes)."""
+    cached ten minutes, or until the study writes a newer result)."""
     cached = _latest_cache.get("v")
-    if cached and time.time() - cached[0] < 600:
+    try:
+        newer = (_local_dir() / f"{NAME}.json").stat().st_mtime > (cached[0] if cached else 0.0)
+    except OSError:
+        newer = False
+    if cached and time.time() - cached[0] < 600 and not newer:
         return cached[1]
     data = None
     try:

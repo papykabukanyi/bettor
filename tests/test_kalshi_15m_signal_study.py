@@ -142,3 +142,18 @@ def test_nothing_is_adopted_without_a_winning_study(monkeypatch):
     monkeypatch.setattr(sig, "latest", lambda: {"adopted": {"enforce": False, "reason": "no family cleared the bar on held-out weeks"}})
     assert sig.adopted() == {"enforce": False, "reason": "no family cleared the bar on held-out weeks"}
     assert sig.LIVE_SIDES == ("yes",)
+
+
+def test_a_finished_study_shows_at_once_not_after_the_cache_expires(monkeypatch, tmp_path):
+    import json as _json
+    import os as _os
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "LOCAL_DIR", tmp_path)
+    monkeypatch.delenv("HF_API_KEY", raising=False)
+    sig._latest_cache.clear()  # noqa: SLF001
+    assert sig.latest() is None
+    path = tmp_path / f"{sig.NAME}.json"
+    path.write_text(_json.dumps({"version": sig.VERSION, "computed_at": "2026-10-08T20:55:48+00:00"}))
+    future = sig.time.time() + 5
+    _os.utime(path, (future, future))
+    assert sig.latest()["computed_at"] == "2026-10-08T20:55:48+00:00"
