@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 NAME = "kalshi15m_signal"
-VERSION = 1
+VERSION = 2  # 2: crypto charts cleaned (bar_quality)
 HF_PATH = "setup_strategy/signal_study.json"
 
 DECISION_MINUTES = tuple(range(1, 13))          # at least 3 minutes left
@@ -323,7 +323,9 @@ def _charts(coins: list[str], years: list[int]) -> dict[str, Chart]:
         if sym in kalshi_15m_setup.METAL_CHART_SYMBOL:
             candles = setup_backtest_job._study_candles(sym)[0]  # noqa: SLF001
         else:
+            from data import bar_quality
             candles = alpaca_crypto_history.candles(sym, years=years)
+            candles = bar_quality.clean(candles, kind="crypto")[0] if candles is not None and not candles.empty else candles
         if candles is not None and not candles.empty:
             charts[sym] = Chart(candles, minute_average=kalshi_15m_setup.settles_on_minute_average(sym))
     for sym in ("SPY", "QQQ"):

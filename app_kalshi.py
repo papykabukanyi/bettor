@@ -1737,6 +1737,13 @@ def _ensure_background_jobs_started() -> None:
             # The 15m bot's new-signal study (weekly, scored on held-out
             # weeks): checked every 30 minutes, runs when due and no
             # multi-year study is using the cores.
+            # Every ticker x every timeframe x every approach, walk-forward on
+            # the whole clean history (user: "force the server"): starts 5
+            # minutes after boot when it has no result this week.
+            from data import approach_study
+            scheduler.add_job(approach_study.maybe_start, "interval", minutes=30, id="approach_study", replace_existing=True,
+                              next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                                  minutes=int(os.getenv("APPROACH_STUDY_STARTUP_DELAY_MIN", "5") or "5")))
             from data import kalshi_15m_signal_study
             scheduler.add_job(kalshi_15m_signal_study.maybe_start, "interval", minutes=30, id="kalshi15m_signal_study",
                               replace_existing=True, next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
@@ -2526,6 +2533,18 @@ def api_setup_backtest(bot: str):
         return jsonify(_run_setup_backtest(bot))
     return jsonify({"ok": True, "bot": bot, "card": setup_backtest_job.strategy_card(bot),
                     "latest": setup_backtest_job.latest(bot)})
+
+
+@app.route("/api/approach-study", methods=["GET"])
+def api_approach_study():
+    """Every ticker x timeframe x approach, walk-forward over the whole clean
+    history: per bot the timeframe/approach families that worked out of
+    sample, the tickers with an approach that cleared the bar, and the
+    data-quality totals (?full=1: the whole published result)."""
+    from data import approach_study
+    if request.args.get("full"):
+        return jsonify({"ok": True, **(approach_study.latest() or {})})
+    return jsonify({"ok": True, **approach_study.summary(), "status": approach_study.overview_row()})
 
 
 @app.route("/api/setup-study/<bot>", methods=["GET"])

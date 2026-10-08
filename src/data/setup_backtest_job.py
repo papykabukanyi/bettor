@@ -638,13 +638,19 @@ def blocked_reason(blocked: dict[str, list[str]] | None, features: dict[str, str
 
 
 def _study_candles(sym: str, bot: str | None = None) -> tuple[pd.DataFrame, str]:
-    """(1-minute candles with ts = END, session) from Alpaca's archives."""
-    from data import alpaca_crypto_history, alpaca_setup, alpaca_sip_history, kalshi_15m_setup
+    """(1-minute candles with ts = END, session) from Alpaca's archives,
+    cleaned (bar_quality: duplicates, impossible candles, bad prints)."""
+    from data import alpaca_crypto_history, alpaca_setup, alpaca_sip_history, bar_quality, kalshi_15m_setup
+
+    def clean(c: pd.DataFrame, kind: str) -> pd.DataFrame:
+        return bar_quality.clean(c, kind=kind)[0] if c is not None and not c.empty else c
+
     if bot in ("stocks", "options"):
-        return alpaca_setup.regular_session_candles(alpaca_sip_history.load(sym)), "us_equity"
+        return clean(alpaca_setup.regular_session_candles(alpaca_sip_history.load(sym)), "stock"), "us_equity"
     if sym in kalshi_15m_setup.METAL_CHART_SYMBOL:
-        return alpaca_setup.regular_session_candles(alpaca_sip_history.load(kalshi_15m_setup.METAL_CHART_SYMBOL[sym])), "us_equity"
-    return alpaca_crypto_history.candles(sym.split("/")[0].upper()), "utc_day"
+        return clean(alpaca_setup.regular_session_candles(alpaca_sip_history.load(kalshi_15m_setup.METAL_CHART_SYMBOL[sym])),
+                     "stock"), "us_equity"
+    return clean(alpaca_crypto_history.candles(sym.split("/")[0].upper()), "crypto"), "utc_day"
 
 
 def _daily_vol(candles: pd.DataFrame, session: str) -> pd.Series:
@@ -1498,7 +1504,9 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 # (crypto from Jan 2021) on the faster replay; stocks/options on the full method.
 # perps 5: every year charged the perp's median recorded spread, not one
 # moment's (sometimes pulled) book.
-STUDY_VERSION = {"perps": 5, "kalshi15m": 5, "crypto": 2, "stocks": 2, "options": 2}
+# All five 2026-10-08 (user: "force the server ... all of them ... pure data"):
+# every study re-learns its whole history on cleaned candles (bar_quality).
+STUDY_VERSION = {"perps": 6, "kalshi15m": 6, "crypto": 3, "stocks": 3, "options": 3}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
@@ -1657,6 +1665,8 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     gets every core). A study that failed waits FAILED_RETRY_HOURS."""
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
+    if _running("approach_study") or _running("kalshi15m_signal"):
+        return {"ok": True, "action": "after_the_running_study"}  # one study holds the cores at a time
     need = _needs_study(bot)
     if need != "due":
         return {"ok": True, "action": need}
@@ -1762,6 +1772,11 @@ def processing_overview(*, now: float | None = None) -> dict[str, Any]:
         out["signal_study"] = kalshi_15m_signal_study.overview_row(now)
     except Exception as exc:  # the panel never fails over one row
         logger.debug("[setup_backtest] signal study row unavailable: %s", exc)
+    try:
+        from data import approach_study
+        out["approach_study"] = approach_study.overview_row(now)
+    except Exception as exc:
+        logger.debug("[setup_backtest] approach study row unavailable: %s", exc)
     return out
 
 

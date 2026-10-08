@@ -308,6 +308,21 @@
       `<span class="alarm">${procEsc(String(r.error || "").slice(0, 160))}</span><br>retries at ${hhmm(r.retry_at)} · ${last}`);
     return procRow(name, "done", "up to date", 100, "ok", `${last} · ${combos}${wd}`);
   }
+  function approachRow(r) {
+    const last = r.last_published_at ? `last run ${hhmm(r.last_published_at)} ${r.last_published_at.slice(5, 10)}${r.last_seconds ? ` (${dur(r.last_seconds)})` : ""}` : "never run yet";
+    const span = r.years ? ` · ${r.years[0]}-${r.years[1]}` : "";
+    if (r.state === "running" || r.state === "stalled") {
+      const p = r.progress || {};
+      const end = r.state === "stalled" ? `<span class="alarm">no progress for ${dur(p.idle_sec)}</span>`
+        : (p.eta_sec ? `finishes in ~${dur(p.eta_sec)}` : "estimating finish&hellip;");
+      return procRow(r.name, r.state, r.state === "stalled" ? "stalled" : procEsc(p.stage || "running"), p.percent ?? 0, r.state === "stalled" ? "bad" : "run",
+        `<b>${p.done ?? 0}/${p.total ?? "?"}</b> tickers learned (every timeframe, every approach)${p.last_symbol ? " · last: " + procEsc(p.last_symbol) : ""} · running ${dur(p.elapsed_sec)} · ${end}`);
+    }
+    if (r.state === "failed") return procRow(r.name, "failed", "failed", 0, "bad", `<span class="alarm">${procEsc(String(r.error || "").slice(-160))}</span> · ${last}`);
+    if (r.state === "due") return procRow(r.name, "queued", "due", null, "", `starts within 30 minutes · ${last}`);
+    const adopt = Object.entries(r.adoptable || {}).map(([b, n]) => `${procEsc(b)} ${n}`).join(", ");
+    return procRow(r.name, "done", "up to date", 100, "ok", `${last} · ${r.tickers} tickers${span}${adopt ? " · approaches that cleared the bar: " + adopt : ""}`);
+  }
   function signalRow(r) {
     const last = r.last_published_at ? `last run ${hhmm(r.last_published_at)} ${r.last_published_at.slice(5, 10)}${r.last_seconds ? ` (${dur(r.last_seconds)})` : ""}` : "never run yet";
     const a = r.adopted || {}, b = r.best;
@@ -340,6 +355,7 @@
     document.getElementById("proc-wrap").innerHTML =
       `<div class="proc-group">Data jobs</div>` + (tasks.length ? tasks.map(taskRow).join("") : `<div class="proc-row proc-detail">No data job running right now.</div>`) +
       `<div class="proc-group">Studies (one at a time, in this order)</div>` + (d.studies || []).map(studyRow).join("") +
+      (d.approach_study ? `<div class="proc-group">Every ticker x every timeframe (clean history, walk-forward by year)</div>` + approachRow(d.approach_study) : "") +
       (d.signal_study ? `<div class="proc-group">15m new-signal study (weekly, scored on held-out weeks)</div>` + signalRow(d.signal_study) : "");
   }
   refreshProcessing();

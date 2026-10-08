@@ -541,3 +541,24 @@ def test_the_stocks_replay_reads_what_the_live_bot_can_enter():
     assert job.stock_replay_symbols(watch, {"enforce": True, "symbols": ["TSLA", "AAPL", "NVDA"]}) == ["AAPL", "TSLA"]
     assert job.stock_replay_symbols(watch, {"enforce": False, "symbols": ["TSLA"]}) == watch
     assert job.stock_replay_symbols(watch, None) == watch
+
+
+def test_studies_learn_on_clean_candles(monkeypatch):
+    """User: "no bad data, pure data" -- a one-minute bad print that snaps
+    straight back never reaches a study's replay."""
+    import numpy as np
+
+    from data import alpaca_crypto_history
+    rng = np.random.default_rng(1)
+    closes = 100 * np.exp(np.cumsum(rng.normal(0, 0.0005, 500)))
+    closes[250] *= 1.08
+    candles = pd.DataFrame({"ts": 1_700_000_040 + 60 * np.arange(500), "open": closes, "high": closes, "low": closes,
+                            "close": closes, "volume": 1.0})
+    monkeypatch.setattr(alpaca_crypto_history, "candles", lambda coin, **kw: candles)
+    clean, session = job._study_candles("BTC", "perps")  # noqa: SLF001
+    assert session == "utc_day" and len(clean) == 499 and closes[250] not in set(clean["close"])
+
+
+def test_the_setup_studies_wait_while_another_study_holds_the_cores(monkeypatch):
+    monkeypatch.setattr(job, "_running", lambda name: name == "approach_study")
+    assert job.maybe_start_multiyear("perps")["action"] == "after_the_running_study"
