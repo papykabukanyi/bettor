@@ -485,3 +485,58 @@ def test_the_processing_overview_shows_every_study_in_queue_order(monkeypatch):
     assert rows["perps"]["state"] == "running" and rows["perps"]["progress"]["done"] == 2 and rows["perps"]["combinations"] == 1680
     assert rows["kalshi15m"]["state"] == "queued" and rows["kalshi15m"]["queue_position"] == 2
     assert rows["crypto"]["waiting_for"] == ["crypto history back to 2021"] and rows["options"]["state"] == "done"
+
+
+def test_perps_typical_spread_is_the_median_of_real_two_sided_quotes(monkeypatch, tmp_path):
+    """What a fill really costs: the median of the recorded quotes, never a
+    candle without a quote (bid = ask = close) or a pulled bid."""
+    import huggingface_hub
+
+    from data import perps_data
+    shard = tmp_path / "2026-10-07.parquet"
+    pd.DataFrame({"ticker": ["KXBTCPERP"] * 4 + ["KXADAPERP"] * 3,
+                  "bid_close": [100.0, 100.0, 100.0, 0.0, 0.2632, 0.2633, 0.25],
+                  "ask_close": [100.004, 100.006, 100.0, 100.0, 0.2635, 0.2636, 0.25]}).to_parquet(shard)
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type):
+            return ["data/2026-10-07.parquet", "data/pregame_schedule/x.parquet", "README.md"]
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: str(shard))
+    monkeypatch.setattr(perps_data, "HF_API_KEY", "token")
+    perps_data._typical_spread_cache.clear()  # noqa: SLF001
+    spreads = perps_data.typical_spread_bps()
+    assert spreads["KXBTCPERP"] == pytest.approx(0.5, abs=0.01)   # median of 0.4 and 0.6 bps
+    assert spreads["KXADAPERP"] == pytest.approx(11.4, abs=0.1)   # median of 11.4 and 11.4 bps
+
+
+def test_the_perps_study_charges_the_median_spread_not_one_moments_book(monkeypatch):
+    """A pulled book once read ADA at 20,000 bps, so its study never traded
+    it; every year is now charged the recorded median (a live snapshot only
+    for a perp the archive lacks)."""
+    from data import kalshi_perps, perps_data, perps_strategy
+    monkeypatch.setattr(perps_data, "typical_spread_bps", lambda: {"KXADAPERP": 9.9})
+    monkeypatch.setattr(perps_strategy, "setup_fee_rate_roundtrip", lambda ticker: 0.0008)
+    monkeypatch.setattr(kalshi_perps, "get_margin_market", lambda ticker: {"market": {"bid": "0.0001", "ask": "0.25"}})
+    costs = job._kalshi_study_costs("perps", ["ADA", "GOLD"])  # noqa: SLF001
+    assert costs["ADA"] == {"fee_rate_roundtrip": 0.0008, "spread_bps": 9.9, "spread_source": "median of the recorded quotes"}
+    assert costs["GOLD"]["spread_source"] == "live snapshot" and costs["GOLD"]["spread_bps"] > 19_000
+
+
+def test_the_crypto_replay_reads_each_coin_once():
+    """The live bot holds one position per coin and every quote currency of
+    a coin reads the same chart: one pair per coin, /USD when listed."""
+    from data import alpaca_crypto_setup
+    universe = ["AAVE/USDC", "AAVE/USD", "AAVE/USDT", "USDT/USD", "BTC/USDC", "BTC/USD", "PEPE/USDT", "USDC/USD"]
+    assert job.crypto_replay_symbols(universe, alpaca_crypto_setup.STABLECOINS) == ["AAVE/USD", "BTC/USD", "PEPE/USDT"]
+
+
+def test_the_stocks_replay_reads_what_the_live_bot_can_enter():
+    watch = ["AAPL", "ABNB", "TSLA", "XOM"]
+    assert job.stock_replay_symbols(watch, {"enforce": True, "symbols": ["TSLA", "AAPL", "NVDA"]}) == ["AAPL", "TSLA"]
+    assert job.stock_replay_symbols(watch, {"enforce": False, "symbols": ["TSLA"]}) == watch
+    assert job.stock_replay_symbols(watch, None) == watch

@@ -95,12 +95,18 @@ def run_perps(days: int) -> dict[str, Any]:
     tickers = {kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(t)): t for t in perps_data.get_watchlist()}
     coins = [c for c in tickers if c in set(spot["coin"])]
     sides = ("long", "short") if perps_strategy.ENABLE_SHORTS else ("long",)
+    typical = perps_data.typical_spread_bps()
     costs = {}
     for coin in coins:
-        try:
-            spread = perps_setup.market_spread_bps(get_margin_market(tickers[coin]).get("market") or {})
-        except Exception:
-            spread = None
+        # What fills really cost: the perp's median recorded spread (a live
+        # snapshot only when the archive lacks it -- one moment's book can
+        # be empty).
+        spread = typical.get(tickers[coin])
+        if spread is None:
+            try:
+                spread = perps_setup.market_spread_bps(get_margin_market(tickers[coin]).get("market") or {})
+            except Exception:
+                spread = None
         costs[coin] = {"fee_rate_roundtrip": perps_strategy.setup_fee_rate_roundtrip(tickers[coin]),
                        "spread_bps": spread if spread is not None else 5.0}
 
@@ -322,10 +328,22 @@ def _alpaca_stock_replay(module_name: str, symbols: list[str], days: int, sides:
 STOCK_REPLAY_DAYS = int(os.getenv("SETUP_BACKTEST_STOCK_DAYS", "120") or "120")
 
 
+MAX_STOCK_REPLAY_SYMBOLS = int(os.getenv("SETUP_BACKTEST_MAX_STOCK_SYMBOLS", "80") or "80")
+MAX_CRYPTO_REPLAY_COINS = int(os.getenv("SETUP_BACKTEST_MAX_CRYPTO_COINS", "40") or "40")
+
+
+def stock_replay_symbols(watchlist: list[str], elig: dict[str, Any] | None) -> list[str]:
+    """What the live stocks bot can enter: its watchlist, narrowed to the
+    study's symbols while that list is in force."""
+    allowed = set((elig or {}).get("symbols") or []) if (elig or {}).get("enforce") else None
+    picked = [s for s in watchlist if allowed is None or s in allowed]
+    return picked[:MAX_STOCK_REPLAY_SYMBOLS]
+
+
 def run_stocks(days: int) -> dict[str, Any]:
     from data import alpaca_data
-    return _alpaca_stock_replay("alpaca_setup", alpaca_data.get_stock_watchlist(None)[:MAX_SYMBOLS], max(days, STOCK_REPLAY_DAYS),
-                                ("long",))
+    return _alpaca_stock_replay("alpaca_setup", stock_replay_symbols(alpaca_data.get_stock_watchlist(None), eligibility("stocks")),
+                                max(days, STOCK_REPLAY_DAYS), ("long",))
 
 
 def run_options(days: int) -> dict[str, Any]:
@@ -334,11 +352,25 @@ def run_options(days: int) -> dict[str, Any]:
                                 max(days, STOCK_REPLAY_DAYS), ("long", "short"))
 
 
+def crypto_replay_symbols(universe: list[str], stablecoins: frozenset[str]) -> list[str]:
+    """One pair per coin the live crypto bot scans (its /USD pair when
+    listed): every quote currency of a coin reads the same chart and the
+    bot holds one position per coin, so AAVE/USD, /USDC and /USDT are one
+    trade, not three."""
+    by_coin: dict[str, str] = {}
+    for sym in universe:
+        coin = sym.split("/")[0].upper()
+        if coin in stablecoins:
+            continue
+        if coin not in by_coin or sym.upper().endswith("/USD"):
+            by_coin[coin] = sym
+    return [by_coin[c] for c in sorted(by_coin)][:MAX_CRYPTO_REPLAY_COINS]
+
+
 def run_crypto(days: int) -> dict[str, Any]:
     from data import alpaca_crypto_data, alpaca_crypto_setup, alpaca_crypto_strategy
     from data import kalshi_15m_spot
-    symbols = [s for s in alpaca_crypto_data.get_crypto_universe()
-               if s.split("/")[0].upper() not in alpaca_crypto_setup.STABLECOINS][:MAX_SYMBOLS]
+    symbols = crypto_replay_symbols(alpaca_crypto_data.get_crypto_universe(), alpaca_crypto_setup.STABLECOINS)
     leaders = {s: alpaca_crypto_setup.leader_for(s) for s in symbols}
     # Same chart the live bot reads: the coin's Coinbase history (HF archive)
     # when it has one, else Alpaca's own bars.
@@ -807,22 +839,30 @@ def _kalshi_study_costs(bot: str, symbols: list[str]) -> dict[str, dict[str, flo
             costs[sym] = {"fee_rate_roundtrip": fee, "spread_bps": spread if spread is not None else float(alpaca_crypto_setup.SPREAD_BPS)}
         return costs
     if bot == "perps":
-        from data import kalshi_15m_spot, perps_setup, perps_strategy
+        from data import kalshi_15m_spot, perps_data, perps_setup, perps_strategy
         from data.kalshi_perps import KNOWN_PERP_TICKERS, get_margin_market
         from data.perps_data import coin_for_ticker
         tickers = {kalshi_15m_spot.chart_coin(coin_for_ticker(t)): t for t in KNOWN_PERP_TICKERS}
         tickers.update({c: f"KX{c}PERP" for c in ("GOLD", "SILVER")})
+        # Every year is charged the perp's median recorded spread -- never one
+        # moment's book, which can be pulled (a study once read ADA at
+        # 20,000 bps and so never traded it).
+        typical = perps_data.typical_spread_bps()
         for sym in symbols:
             ticker = tickers.get(sym, f"KX{sym}PERP")
             try:
                 fee = float(perps_strategy.setup_fee_rate_roundtrip(ticker))
             except Exception:
                 fee = 0.0015
-            try:
-                spread = perps_setup.market_spread_bps(get_margin_market(ticker).get("market") or {})
-            except Exception:
-                spread = None
-            costs[sym] = {"fee_rate_roundtrip": fee, "spread_bps": spread if spread is not None else 5.0}
+            spread, source = typical.get(ticker), "median of the recorded quotes"
+            if spread is None:
+                source = "live snapshot"
+                try:
+                    spread = perps_setup.market_spread_bps(get_margin_market(ticker).get("market") or {})
+                except Exception:
+                    spread = None
+            costs[sym] = {"fee_rate_roundtrip": fee, "spread_bps": spread if spread is not None else 5.0,
+                          "spread_source": source if spread is not None else "default"}
         return costs
     from data import kalshi_15m_quotes
     try:
@@ -1299,6 +1339,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     shutil.rmtree(_work_dir(bot), ignore_errors=True)  # in-flight reports of an earlier run are stale
     mark()
     todo = [s for s in symbols if s not in parts]
+    costs: dict[str, dict[str, Any]] = {}
     if todo and bot in ARCHIVE_STUDY_BOTS:
         # Archives to local disk once, before the workers read them.
         from data import alpaca_news_history
@@ -1332,6 +1373,8 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     frames = [t for t in parts.values() if not t.empty]
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     result = _analyse_multiyear(bot, trades, symbols=symbols, grid=grid, started=started, mark=mark)
+    if costs:
+        result["costs"] = costs  # what each symbol's trades were charged
     mark(stage="writing")
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     if not trades.empty:
@@ -1449,7 +1492,9 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 # regime learned too; kalshi15m 2: settles on Kalshi's reference.
 # Bumped together on 2026-10-08: every bot re-studies its whole history
 # (crypto from Jan 2021) on the faster replay; stocks/options on the full method.
-STUDY_VERSION = {"perps": 4, "kalshi15m": 5, "crypto": 2, "stocks": 2, "options": 2}
+# perps 5: every year charged the perp's median recorded spread, not one
+# moment's (sometimes pulled) book.
+STUDY_VERSION = {"perps": 5, "kalshi15m": 5, "crypto": 2, "stocks": 2, "options": 2}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:

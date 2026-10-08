@@ -161,3 +161,51 @@ def test_a_commodity_perp_off_hours_says_the_market_is_closed():
     assert r["checks"]["data"]["detail"] == "US market closed (ETF chart)"
     r = perps_setup.setup_from_candles(stale, sides=("long",), fee_rate_roundtrip=0.0, news_score=None, now=saturday)
     assert r["checks"]["data"]["detail"].startswith("last candle")
+
+
+def _et(stamp: str) -> int:
+    return int(pd.Timestamp(stamp, tz="America/New_York").timestamp())
+
+
+def _metal_chart() -> pd.DataFrame:
+    """GLD candles (ts = END) before, during and after Thursday's session."""
+    ends = [_et("2026-10-08 08:01"), _et("2026-10-08 10:01"), _et("2026-10-08 16:00"), _et("2026-10-08 17:01")]
+    return pd.DataFrame({"ts": ends, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0})
+
+
+def test_a_commodity_chart_keeps_only_the_regular_session_its_study_graded(monkeypatch):
+    """Both bots' commodity studies read the ETF's regular session only; the
+    live charts are cut the same way (pre-market and after-hours dropped)."""
+    from data import kalshi_15m_setup, perps_setup
+    monkeypatch.setattr(kalshi_15m_setup, "metals_candles", lambda metal: _metal_chart())
+    kept = [_et("2026-10-08 10:01"), _et("2026-10-08 16:00")]
+    assert kalshi_15m_setup.underlying_candles("GOLD").ts.tolist() == kept
+    assert perps_setup.chart_candles("KXGOLDPERP").ts.tolist() == kept
+
+
+@pytest.mark.parametrize("opens,ok", [("2026-10-08 09:30", False), ("2026-10-08 09:45", True), ("2026-10-08 15:45", True),
+                                      ("2026-10-08 16:00", False), ("2026-10-08 08:30", False), ("2026-10-10 11:00", False)])
+def test_a_commodity_15m_window_trades_only_where_its_study_had_one(opens, ok):
+    """The 15m study graded a commodity window only with a regular-session
+    candle at its open and its close (09:45-15:45 ET openings, weekdays)."""
+    from data import kalshi_15m_setup
+    assert kalshi_15m_setup.window_in_study_session("GOLD", _et(opens)) is ok
+    assert kalshi_15m_setup.window_in_study_session("BTC", _et(opens)) is True
+
+
+def test_a_15m_commodity_setup_outside_the_session_is_not_read(monkeypatch):
+    from data import kalshi_15m_setup
+    monkeypatch.setattr(kalshi_15m_setup, "underlying_candles", lambda coin: pytest.fail("chart read outside the session"))
+    r = kalshi_15m_setup.live_setup("GOLD", news_score=None, now=_et("2026-10-08 08:37"), strike_ts=_et("2026-10-08 08:30"))
+    assert r["valid"] is False and r["reason"] == "data"
+    assert r["checks"]["data"]["detail"].startswith("outside US market hours: GLD")
+
+
+def test_a_commodity_perp_is_entered_only_in_regular_hours_even_on_a_fresh_chart():
+    """Pre-market GLD prints keep the chart fresh, but the study never
+    graded those hours."""
+    from data import perps_setup
+    now = _et("2026-10-08 08:37")
+    fresh = pd.DataFrame({"ts": [now - 30], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1.0]})
+    r = perps_setup.setup_from_candles(fresh, sides=("long",), fee_rate_roundtrip=0.0, news_score=None, now=now, session="us_equity")
+    assert r["valid"] is False and r["checks"]["data"]["detail"] == "US market closed (ETF chart)"

@@ -869,10 +869,38 @@ def metals_candles(metal: str) -> pd.DataFrame:
     return df
 
 
+def regular_session_bar(ts_end: int) -> bool:
+    """Whether the 1-minute candle ending at ts_end is a regular US-session
+    candle (it starts 09:30-15:59 ET on a weekday)."""
+    t = _dt.datetime.fromtimestamp(int(ts_end) - 60, _ET)
+    return t.weekday() < 5 and 9 * 60 + 30 <= t.hour * 60 + t.minute < 16 * 60
+
+
+def regular_session_only(one_min: pd.DataFrame) -> pd.DataFrame:
+    """A commodity ETF's chart cut to its regular-session candles (ts =
+    END) -- the chart its study graded (the SIP archive's regular session).
+    Pre-market and after-hours prints are thin and were never graded."""
+    if one_min is None or one_min.empty:
+        return one_min
+    t = pd.to_datetime(one_min["ts"].astype("int64") - 60, unit="s", utc=True).dt.tz_convert(_ET)
+    minute = t.dt.hour * 60 + t.dt.minute
+    keep = (t.dt.weekday < 5) & (minute >= 9 * 60 + 30) & (minute < 16 * 60)
+    return one_min[keep.to_numpy()].reset_index(drop=True)
+
+
+def window_in_study_session(coin: str, open_ts: int, *, window_sec: int = 900) -> bool:
+    """A commodity window is traded only where its study had one: a
+    regular-session candle at both its open and its close (windows opening
+    09:45-15:45 ET). Crypto trades around the clock."""
+    if coin not in METAL_CHART_SYMBOL:
+        return True
+    return regular_session_bar(int(open_ts)) and regular_session_bar(int(open_ts) + window_sec)
+
+
 def underlying_candles(coin: str) -> pd.DataFrame:
     from data import kalshi_15m_spot
     if coin in METAL_CHART_SYMBOL:
-        return metals_candles(coin)
+        return regular_session_only(metals_candles(coin))
     if coin in kalshi_15m_spot.SPOT_PRODUCTS:
         return kalshi_15m_spot.recent_series(coin)[["ts", "open", "high", "low", "close", "volume"]]
     return pd.DataFrame()
@@ -928,6 +956,10 @@ def live_setup(coin: str, *, news_score: float | None, now: float | None = None,
     between the chart source (Alpaca spot, SIP ETFs) and Kalshi's
     settlement source (CF Benchmarks, Pyth) enters the comparison."""
     now = time.time() if now is None else now
+    if not window_in_study_session(coin, strike_ts if strike_ts is not None else int(now) // 60 * 60):
+        return {"valid": False, "reason": "data", "checks": {"data": {
+            "ok": False, "detail": f"outside US market hours: {METAL_CHART_SYMBOL[coin]} trades fully only 09:30-16:00 ET, "
+                                   "the only windows its study graded"}}}
     one_min = underlying_candles(coin) if candles is None else candles
     if one_min is None or one_min.empty:
         return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": "no underlying candles"}}}

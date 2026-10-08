@@ -987,3 +987,48 @@ def load_training_dataset(*, max_shards: int = 90, max_rows: int | None = None) 
         if cap and len(combined) > cap:
             combined = combined.sort_values("ts").tail(cap).reset_index(drop=True)
     return combined
+
+
+TYPICAL_SPREAD_DAYS = int(os.getenv("PERPS_TYPICAL_SPREAD_DAYS", "30") or "30")
+_typical_spread_cache: dict[int, tuple[float, dict[str, float]]] = {}
+
+
+def typical_spread_bps(*, days: int = TYPICAL_SPREAD_DAYS) -> dict[str, float]:
+    """Each perp's median bid/ask spread in bps over the last `days` of the
+    recorded 1-minute candles (two-sided quotes only): what a fill really
+    costs. Real entries since 2026-09 filled within a few bps of these
+    quotes, while one /margin/markets snapshot can catch a pulled book
+    (Kalshi's early-morning maintenance read ADA at 20,000 bps and ETH at
+    73 against medians of 10 and 0.4). Cached an hour; {} when the archive
+    can't be read."""
+    cached = _typical_spread_cache.get(days)
+    if cached and time.time() - cached[0] < 3600:
+        return cached[1]
+    from huggingface_hub import HfApi, hf_hub_download
+
+    from server_common import call_with_hard_timeout
+    if not HF_API_KEY:
+        return {}
+    listed = call_with_hard_timeout(lambda: HfApi(token=HF_API_KEY).list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset"),
+                                    timeout_sec=_LOAD_TRAINING_DATASET_LIST_TIMEOUT_SEC)
+    files = sorted(f for f in (listed or []) if _DATE_SHARD_RE.match(f))[-days:]
+    frames = []
+    for f in files:
+        path = call_with_hard_timeout(lambda f=f: hf_hub_download(repo_id=HF_DATASET_REPO, filename=f, repo_type="dataset",
+                                                                  token=HF_API_KEY),
+                                      timeout_sec=_LOAD_TRAINING_DATASET_SHARD_TIMEOUT_SEC)
+        if path is None:
+            continue
+        try:
+            frames.append(pd.read_parquet(path, columns=["ticker", "bid_close", "ask_close"]))
+        except Exception as exc:
+            logger.warning("[perps_data] spread read failed for shard %s: %s", f, exc)
+    if not frames:
+        return {}
+    df = pd.concat(frames, ignore_index=True)
+    bid, ask = df["bid_close"].astype(float), df["ask_close"].astype(float)
+    two_sided = (bid > 0) & (ask > bid)  # a candle without a quote carries bid = ask = close
+    spread = ((ask - bid) / ((ask + bid) / 2.0) * 1e4)[two_sided]
+    out = {str(t): round(float(v), 3) for t, v in spread.groupby(df.loc[two_sided, "ticker"].astype(str)).median().items()}
+    _typical_spread_cache[days] = (time.time(), out)
+    return out

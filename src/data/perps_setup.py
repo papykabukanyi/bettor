@@ -901,10 +901,22 @@ def chart_session(coin: str) -> str:
     return "us_equity" if coin in METAL_COINS else SESSION
 
 
+def _regular_session_only(one_min: pd.DataFrame) -> pd.DataFrame:
+    """An ETF chart cut to its regular-session candles (ts = END), as this
+    bot's study read it (the SIP archive's regular session): pre-market and
+    after-hours prints are thin and were never graded."""
+    if one_min is None or one_min.empty:
+        return one_min
+    t = pd.to_datetime(one_min["ts"].astype("int64") - 60, unit="s", utc=True).dt.tz_convert(_ET)
+    minute = t.dt.hour * 60 + t.dt.minute
+    keep = (t.dt.weekday < 5) & (minute >= 9 * 60 + 30) & (minute < 16 * 60)
+    return one_min[keep.to_numpy()].reset_index(drop=True)
+
+
 def _chart_for_coin(coin: str) -> pd.DataFrame:
     from data import kalshi_15m_setup, kalshi_15m_spot
     if coin in METAL_COINS:
-        return kalshi_15m_setup.metals_candles(coin)
+        return _regular_session_only(kalshi_15m_setup.metals_candles(coin))
     if coin not in kalshi_15m_spot.SPOT_PRODUCTS:
         return pd.DataFrame()
     return kalshi_15m_spot.recent_series(coin)[["ts", "open", "high", "low", "close", "volume"]]
@@ -961,14 +973,15 @@ def setup_from_candles(one_min: pd.DataFrame, *, sides: tuple[str, ...], fee_rat
     """spread_bps: the traded instrument's spread; None reads it from the
     candles' own bid_close/ask_close when they carry them."""
     now = time.time() if now is None else now
+    if session == "us_equity" and not _us_session_open(now):
+        # A commodity perp is entered only while its ETF chart trades its
+        # regular session -- the only hours its study graded.
+        return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": "US market closed (ETF chart)"}}}
     if one_min is None or one_min.empty:
         return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": "no chart candles for this coin"}}}
     last_ts = int(one_min["ts"].max())
     if now - last_ts > STALE_AFTER_SEC:
-        detail = f"last candle {int(now - last_ts)}s old"
-        if session == "us_equity" and not _us_session_open(now):
-            detail = "US market closed (ETF chart)"
-        return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": detail}}}
+        return {"valid": False, "reason": "data", "checks": {"data": {"ok": False, "detail": f"last candle {int(now - last_ts)}s old"}}}
     if spread_bps is None:
         spread_bps = 0.0
         last = one_min.sort_values("ts").iloc[-1]
