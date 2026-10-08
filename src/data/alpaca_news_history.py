@@ -228,13 +228,17 @@ def backfill(*, start_year: int = START_YEAR, refresh_recent: int = 2) -> dict[s
         if stored and key not in recent and not added:
             continue
         tasks.append((y, m, key, stored, added if stored and key not in recent else wanted))
+    from server_common import task_end, task_start, task_step
     written, uploaded, articles, failed = [], [], 0, 0
+    task_start("News archive", len(tasks), detail=(f"adding {len(added)} tickers to every stored month" if added
+                                                   else "new and recent months"))
     # Months fetched FETCH_THREADS at a time (network-bound; Alpaca's
     # Algo Trader Plus allows far more requests than this makes).
     with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
         futures = {pool.submit(fetch_month, y, m, symbols=syms): (key, stored) for y, m, key, stored, syms in tasks}
         for fut in as_completed(futures):
             key, stored = futures[fut]
+            task_step("News archive", advance=1, current=key)
             try:
                 df = fut.result()
             except Exception as exc:
@@ -247,6 +251,7 @@ def backfill(*, start_year: int = START_YEAR, refresh_recent: int = 2) -> dict[s
             if len(written) - len(uploaded) >= FILES_PER_COMMIT:
                 uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
     uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
+    task_end("News archive", ok=not failed, detail=f"{len(written)} months, {articles:,} articles" + (f", {failed} failed" if failed else ""))
     if not failed and len(uploaded) == len(written) and _hf_token():
         import json
 

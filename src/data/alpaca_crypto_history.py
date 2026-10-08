@@ -167,11 +167,14 @@ def upload(paths: list[tuple[str, int]], *, message: str) -> list[tuple[str, int
 
 def backfill(coins: list[str] | None = None, *, start_year: int = START_YEAR) -> dict[str, Any]:
     """Full history per coin, year by year."""
+    from server_common import task_end, task_start, task_step
     coins = coins or universe()
     now = dt.datetime.now(dt.timezone.utc)
     written: list[tuple[str, int]] = []
     rows = 0
-    for coin in coins:
+    task_start("Crypto minute bars", len(coins), detail=f"Kraken US via Alpaca, {start_year} to today")
+    for k, coin in enumerate(coins):
+        task_step("Crypto minute bars", done=k, current=coin)
         for year in range(start_year, now.year + 1):
             start = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
             end = min(dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc), now)
@@ -186,6 +189,7 @@ def backfill(coins: list[str] | None = None, *, start_year: int = START_YEAR) ->
             written.append((coin, year))
             rows += len(df)
     uploaded = upload(written, message="Alpaca Kraken US 1m bars backfill")
+    task_end("Crypto minute bars", detail=f"{len(written)} coin-years, {rows:,} bars")
     return {"ok": True, "coins": len(coins), "files": len(written), "rows": rows, "uploaded": len(uploaded)}
 
 
@@ -261,12 +265,16 @@ def deepen_history(*, start_year: int = START_YEAR) -> dict[str, Any]:
     from huggingface_hub import HfApi
     api = HfApi(token=token)
     stored = _stored_years(set(api.list_repo_files(HF_REPO, repo_type="dataset")))
+    from server_common import task_end, task_start, task_step
     done = _deepened()
     written: list[tuple[str, int]] = []
     checked: dict[str, int] = {}
-    for coin, years in sorted(stored.items()):
-        if done.get(coin, 10**4) <= start_year:
-            continue
+    todo = [(c, y) for c, y in sorted(stored.items()) if done.get(c, 10**4) > start_year]
+    task_start("Crypto history back to 2021", len(todo), detail=f"{len(stored) - len(todo)} coins already checked")
+    uploaded: list[tuple[str, int]] = []
+    for k, (coin, years) in enumerate(todo):
+        task_step("Crypto history back to 2021", done=k, current=coin)
+        mine: list[tuple[str, int]] = []
         for year in range(start_year, years[0]):
             start = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
             try:
@@ -276,13 +284,18 @@ def deepen_history(*, start_year: int = START_YEAR) -> dict[str, Any]:
                 break  # retried on the next run (not marked checked)
             if not df.empty:
                 write_year(coin, year, df, merge_remote=False)
-                written.append((coin, year))
+                mine.append((coin, year))
         else:
-            checked[coin] = start_year
-    uploaded = upload(written, message=f"Alpaca Kraken US 1m bars: history back to {start_year}")
-    if checked and len(uploaded) == len(written):
-        api.upload_file(path_or_fileobj=json.dumps({**done, **checked}, sort_keys=True).encode(), path_in_repo=DEEPENED_PATH,
-                        repo_id=HF_REPO, repo_type="dataset", commit_message="crypto history checked back to the start")
+            # Saved coin by coin: a restart only redoes the coin it was on.
+            sent = upload(mine, message=f"Alpaca Kraken US 1m bars: {coin} back to {start_year}") if mine else []
+            written += mine
+            uploaded += sent
+            if len(sent) == len(mine):
+                checked[coin] = start_year
+                api.upload_file(path_or_fileobj=json.dumps({**done, **checked}, sort_keys=True).encode(), path_in_repo=DEEPENED_PATH,
+                                repo_id=HF_REPO, repo_type="dataset", commit_message=f"crypto history: {coin} checked back to the start")
+    task_end("Crypto history back to 2021", ok=len(checked) == len(todo),
+             detail=f"{len(written)} coin-years added; {len(checked)}/{len(todo)} coins checked")
     return {"ok": True, "files": len(written), "uploaded": len(uploaded), "coins_checked": len(checked)}
 
 

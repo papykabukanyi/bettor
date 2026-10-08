@@ -110,6 +110,28 @@
   .corr-table th { color: var(--muted); font-weight: 600; }
   .corr-scroll { overflow-x: auto; }
   .corr-table td .pos { color: var(--green); } .corr-table td .neg { color: var(--red); }
+  .proc-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 6px 16px; margin-bottom: 22px; }
+  .proc-group { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; padding: 12px 0 2px; }
+  .proc-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .proc-row:last-child { border-bottom: 0; }
+  .proc-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 7px; }
+  .proc-name { font-weight: 700; font-size: 14px; }
+  .proc-state { font-size: 10.5px; font-weight: 700; letter-spacing: .03em; padding: 2px 9px; border-radius: 999px; margin-left: 8px;
+    background: var(--surface2); color: var(--muted); }
+  .proc-state.running { background: #1e3a8a55; color: #93c5fd; } .proc-state.done { background: var(--gdim); color: var(--green); }
+  .proc-state.waiting { background: var(--ydim); color: var(--yellow); } .proc-state.stalled, .proc-state.failed { background: var(--rdim); color: var(--red); }
+  .proc-pct { font-weight: 800; font-variant-numeric: tabular-nums; }
+  .proc-detail { color: var(--muted); font-size: 12px; margin-top: 7px; line-height: 1.5; }
+  .proc-detail b { color: var(--text); font-weight: 600; }
+  .proc-detail .alarm { color: var(--red); font-weight: 700; }
+  .pbar { height: 9px; border-radius: 999px; background: #ffffff12; overflow: hidden; }
+  .pbar > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3b82f6, #8b5cf6); transition: width .6s ease; }
+  .pbar.run > span { background-image: linear-gradient(135deg, #ffffff26 25%, transparent 25%, transparent 50%, #ffffff26 50%, #ffffff26 75%, transparent 75%),
+    linear-gradient(90deg, #3b82f6, #8b5cf6); background-size: 22px 22px, 100% 100%; animation: pbar-move 1s linear infinite; }
+  .pbar.ok > span { background: var(--green); } .pbar.bad > span { background: var(--red); } .pbar.wait > span { background: var(--yellow); }
+  @keyframes pbar-move { from { background-position: 0 0, 0 0; } to { background-position: 22px 0, 0 0; } }
+  .live-tag { display: inline-flex; align-items: center; gap: 5px; color: var(--green); text-transform: none; letter-spacing: normal; font-weight: 600; }
+  .live-tag .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
 </style>
 </head>
 <body>
@@ -121,6 +143,10 @@
   </div>
 </div>
 <div class="sub">5 automated trading bots, one hub. Pick a dashboard for real-time positions, P&amp;L, and model status.</div>
+
+<div class="section-label" style="margin-top:6px">&#9881; Processing on HF <span class="live-tag"><span class="dot"></span>live</span> <span class="line"></span>
+  <span id="proc-updated" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
+<div class="proc-wrap" id="proc-wrap"><div class="proc-row" style="color:var(--muted)">Loading&hellip;</div></div>
 
 <div class="grid">
   <div class="card" data-status-url="/api/status" data-bot="perps">
@@ -227,8 +253,9 @@
   // hardcoded-badge blocks (one of which -- kalshi15m's -- already went
   // stale once in production because it was the only dynamic one).
   // Per-card stats from each bot's own status route.
+  function refreshCards() {
   document.querySelectorAll(".card[data-status-url]").forEach(card => {
-    fetch(card.getAttribute("data-status-url")).then(r => r.json()).then(data => {
+    fetch(card.getAttribute("data-status-url"), { cache: "no-store" }).then(r => r.json()).then(data => {
       if (!data.ok) return;
       const pnlEl = card.querySelector('[data-stat="pnl"]');
       const pnl = data.today_realized_pnl_usd;
@@ -239,6 +266,72 @@
       card.querySelector('[data-stat="winrate"]').textContent = wr != null ? fmtPct(wr) : "--";
     }).catch(() => {});
   });
+  }
+  refreshCards();
+  setInterval(refreshCards, 10000);
+
+  // Processing on HF: every data job and every study, live, so each one is
+  // held to finishing -- progress, finish estimate, stalls, queue, waits.
+  const PROC_NAME = { perps: "Perps study", kalshi15m: "15-Min study", crypto: "Crypto study", stocks: "Stocks study", options: "Options study" };
+  const procEsc = (v) => String(v ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  function dur(s) {
+    if (s == null) return "--";
+    s = Math.max(0, Math.round(s));
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return h ? `${h}h ${String(m).padStart(2, "0")}m` : m ? `${m}m` : `${s}s`;
+  }
+  const hhmm = (iso) => iso ? String(iso).slice(11, 16) + " UTC" : "--";
+  const ago = (iso) => iso ? dur((Date.now() - Date.parse(iso)) / 1000) + " ago" : "";
+  function procRow(name, state, label, pct, barClass, detail) {
+    return `<div class="proc-row"><div class="proc-head"><span><span class="proc-name">${procEsc(name)}</span><span class="proc-state ${state}">${procEsc(label)}</span></span>
+      <span class="proc-pct">${pct == null ? "" : pct.toFixed(pct >= 10 ? 0 : 1) + "%"}</span></div>
+      <div class="pbar ${barClass}"><span style="width:${!pct ? 0 : Math.max(pct, 1)}%"></span></div>
+      <div class="proc-detail">${detail}</div></div>`;
+  }
+  function studyRow(r) {
+    const name = PROC_NAME[r.bot] || r.bot, combos = `${(r.combinations || 0).toLocaleString()} combinations`;
+    const last = r.last_published_at ? `last published ${hhmm(r.last_published_at)} ${r.last_published_at.slice(5, 10)}${r.last_seconds ? ` (${dur(r.last_seconds)} run)` : ""}` : "never published yet";
+    const wd = r.watchdog_restarts ? ` · watchdog restarts: ${r.watchdog_restarts}` : "";
+    if (r.state === "running" || r.state === "stalled") {
+      const p = r.progress || {};
+      const flight = (p.in_flight || []).map(([s, f]) => `${procEsc(s)} ${Math.round(f * 100)}%`).join(", ");
+      const end = r.state === "stalled"
+        ? `<span class="alarm">no progress for ${dur(p.idle_sec)} -- the watchdog stops it and relaunches it where it stopped</span>`
+        : (p.eta_at ? `finishes <b>~${hhmm(p.eta_at)}</b> (in ${dur(p.eta_sec)})` : "estimating finish&hellip;");
+      return procRow(name, r.state, r.state === "stalled" ? "stalled" : procEsc(p.stage || "running"), p.percent ?? 0, r.state === "stalled" ? "bad" : "run",
+        `<b>${p.done}/${p.total}</b> symbols done${flight ? " · now: " + flight : ""} · ${combos} · ${(p.trades_so_far || 0).toLocaleString()} trades so far · running ${dur(p.elapsed_sec)}${p.resumed ? ` · resumed ${p.resumed} saved` : ""}<br>${end}${wd}`);
+    }
+    if (r.state === "queued") return procRow(name, "queued", `queued #${r.queue_position}`, null, "", `${combos} · starts when the study ahead finishes · ${last}${wd}`);
+    if (r.state === "waiting") return procRow(name, "waiting", "waiting for data", null, "wait",
+      `needs: <b>${(r.waiting_for || []).map(procEsc).join(", ")}</b> (see the data jobs above) · ${combos} · ${last}`);
+    if (r.state === "failed") return procRow(name, "failed", "failed", 0, "bad",
+      `<span class="alarm">${procEsc(String(r.error || "").slice(0, 160))}</span><br>retries at ${hhmm(r.retry_at)} · ${last}`);
+    return procRow(name, "done", "up to date", 100, "ok", `${last} · ${combos}${wd}`);
+  }
+  function taskRow(t) {
+    const pct = t.total ? 100 * t.done / t.total : (t.state === "done" ? 100 : 0);
+    if (t.state === "running") return procRow(t.name, "running", "running", pct, "run",
+      `<b>${t.done}/${t.total}</b>${t.current ? " · now: " + procEsc(t.current) : ""} · ${procEsc(t.detail)} · started ${hhmm(t.started_at)} · last step ${ago(t.updated_at)}`);
+    if (t.state === "failed") return procRow(t.name, "failed", "failed", pct, "bad", `${procEsc(t.detail)} · ${hhmm(t.finished_at)}`);
+    return procRow(t.name, "done", "done", 100, "ok", `${procEsc(t.detail)} · finished ${hhmm(t.finished_at)}`);
+  }
+  let procAt = null;
+  async function refreshProcessing() {
+    let d;
+    try { d = await (await fetch("/api/processing", { cache: "no-store" })).json(); } catch (e) { return; }
+    if (!d || !d.ok) return;
+    procAt = Date.now();
+    const tasks = (d.tasks || []).filter(t => t.state === "running" || (Date.now() - Date.parse(t.finished_at || 0)) < 12 * 3600e3);
+    document.getElementById("proc-wrap").innerHTML =
+      `<div class="proc-group">Data jobs</div>` + (tasks.length ? tasks.map(taskRow).join("") : `<div class="proc-row proc-detail">No data job running right now.</div>`) +
+      `<div class="proc-group">Studies (one at a time, in this order)</div>` + (d.studies || []).map(studyRow).join("");
+  }
+  refreshProcessing();
+  setInterval(refreshProcessing, 5000);
+  setInterval(() => {
+    const el = document.getElementById("proc-updated");
+    if (el && procAt) el.textContent = `updated ${Math.round((Date.now() - procAt) / 1000)}s ago`;
+  }, 1000);
 
   // Strategy board: each bot's rule in force, its evidence, decision freshness.
   const BOARD_NAME = { perps: "Perps", kalshi15m: "15-Min", crypto: "Crypto", stocks: "Stocks", options: "Options" };
@@ -268,7 +361,7 @@
     }).join("");
   }
   refreshBoard();
-  setInterval(refreshBoard, 30000);
+  setInterval(refreshBoard, 15000);
 
   // LIVE only when the bot's running code has real-order trading on AND its
   // trading loop completed a run in the last 10 minutes -- one shared
@@ -309,7 +402,7 @@
     }
   }
   refreshLiveBadges();
-  setInterval(refreshLiveBadges, 30000);
+  setInterval(refreshLiveBadges, 10000);
 
   // Project-wide, AI-powered status review (HF Inference), all 5 markets -- see
   // ai_monitor.py's own module docstring. Read-only, fetched once on

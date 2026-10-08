@@ -403,3 +403,62 @@ def test_the_strategy_board_shows_each_bots_rule_and_evidence(monkeypatch):
     assert board["perps"]["source"] == "trained" and board["perps"]["blocked"] == {"weekday": ["sat"]}
     assert board["kalshi15m"]["source"] == "defaults" and board["kalshi15m"]["sides"] == ["long"]
     assert board["kalshi15m"]["replay"]["trades"] == 19
+
+
+def test_a_running_study_reports_live_progress_and_a_finish_estimate():
+    """The dashboard's progress bar: finished symbols plus the ones in flight
+    (each worker reports after every setting; the first pass weighs most),
+    with a finish estimate from this run's pace."""
+    import datetime as _dt
+    import time as _t
+    now = _t.time()
+    started = _dt.datetime.fromtimestamp(now - 3600, _dt.timezone.utc).isoformat()
+    progress = {"bot": "perps", "done": 4, "total": 10, "started_at": started, "stage": "replaying", "resumed": [], "trades_so_far": 900}
+    (job.LOCAL_DIR / "perps_multiyear_progress.json").write_text(json.dumps(progress))
+    job._work_progress("perps", "BTC", 1, 57, 50)   # noqa: SLF001 -- first (heaviest) pass done
+    job._work_progress("perps", "ETH", 57, 57, 70)  # noqa: SLF001 -- finished, about to be saved
+    sp = job.study_progress("perps", progress, now=now)
+    first = job.FIRST_PASS_WEIGHT / (job.FIRST_PASS_WEIGHT + 56)
+    assert sp["fraction"] == pytest.approx(0.95 * (4 + first) / 10, abs=1e-3)
+    assert [s for s, _ in sp["in_flight"]] == ["BTC"] and sp["trades_so_far"] == 950
+    assert 3600 < sp["eta_sec"] < 3 * 3600 and sp["stalled"] is False and sp["percent"] == pytest.approx(100 * sp["fraction"], abs=0.1)
+
+
+def test_the_watchdog_restarts_a_stalled_study_where_it_stopped(monkeypatch):
+    """No progress for STALL_MINUTES: the study is stopped (its saved symbols
+    stay) and the next launcher tick relaunches it; after too many stalls
+    it is marked failed instead."""
+    import os as _os
+    import time as _t
+    killed = []
+    (job.LOCAL_DIR / "perps_multiyear.pid").write_text("4242")
+    progress = job.LOCAL_DIR / "perps_multiyear_progress.json"
+    progress.write_text(json.dumps({"done": 3, "total": 13, "started_at": "2026-10-08T01:00:00+00:00", "stage": "replaying"}))
+    old = _t.time() - (job.STALL_MINUTES + 5) * 60
+    _os.utime(progress, (old, old))
+    alive = {"v": True}
+    monkeypatch.setattr(job, "_running", lambda name: name == "perps_multiyear" and alive["v"])
+    monkeypatch.setattr(job, "_pid_alive", lambda pid: (False, None))
+    monkeypatch.setattr(job.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(job.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+    out = job.watch_studies()
+    assert "relaunching where it stopped" in out["acted"]["perps"] and killed and not (job.LOCAL_DIR / "perps_multiyear.pid").exists()
+    for _ in range(job.WATCHDOG_MAX_RESTARTS - 1):
+        (job.LOCAL_DIR / "perps_multiyear.pid").write_text("4242")
+        out = job.watch_studies()
+    assert out["acted"]["perps"] == "stalled_too_often" and "stalled" in json.loads((job.LOCAL_DIR / "perps_multiyear_error.json").read_text())["error"]
+
+
+def test_the_processing_overview_shows_every_study_in_queue_order(monkeypatch):
+    monkeypatch.setattr(job, "_running", lambda name: name == "perps_multiyear")
+    monkeypatch.setattr(job, "_restore_published_report", lambda bot: None)
+    (job.LOCAL_DIR / "perps_multiyear_progress.json").write_text(json.dumps(
+        {"done": 2, "total": 13, "started_at": "2026-10-08T01:00:00+00:00", "stage": "replaying", "resumed": []}))
+    needs = {"kalshi15m": ("due", []), "crypto": ("waiting_for_archive", ["crypto history back to 2021"]),
+             "stocks": ("waiting_for_archive", ["news for the stock and options tickers"]), "options": ("already_published", [])}
+    monkeypatch.setattr(job, "_cached_need", lambda bot: needs[bot])
+    rows = {r["bot"]: r for r in job.processing_overview()["studies"]}
+    assert list(rows) == ["perps", "kalshi15m", "crypto", "stocks", "options"]
+    assert rows["perps"]["state"] == "running" and rows["perps"]["progress"]["done"] == 2 and rows["perps"]["combinations"] == 1680
+    assert rows["kalshi15m"]["state"] == "queued" and rows["kalshi15m"]["queue_position"] == 2
+    assert rows["crypto"]["waiting_for"] == ["crypto history back to 2021"] and rows["options"]["state"] == "done"

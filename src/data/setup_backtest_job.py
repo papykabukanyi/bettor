@@ -738,7 +738,8 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
     frames = []
     vprep = vol_prep(candles, session)  # the coin's volatility, once for every setting
     cache = _SettingFreeCache(m).__enter__()
-    for setting in grid:
+    _work_progress(bot, sym, 0, len(grid), 0)
+    for k_setting, setting in enumerate(grid):
         m.STOP_BUFFER_ATR15, m.MIN_RR = setting
         exits = [(hold * 60.0, be) for hold, be in BOT_EXITS.get(bot, [])]
         if bot == "perps":
@@ -767,6 +768,7 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
                 label = f"{setting[0]}:{setting[1]}"
             frames.append(_annotate(t, sym, news_idx, regimes, us_market_states(spy, t["entry_ts"].to_numpy("int64"))).assign(
                 symbol=sym, param=label, vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
+        _work_progress(bot, sym, k_setting + 1, len(grid), int(sum(len(f) for f in frames)))
     cache.__exit__()
     m.STOP_BUFFER_ATR15, m.MIN_RR = default
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1008,6 +1010,138 @@ def walk_forward_trained(trades: pd.DataFrame, *, default_param: str, min_trades
             "rule": f"setting and symbols chosen on {_lookback_words(lookback_years)}: >= {min_trades} trades, average net > 0"}
 
 
+# Live progress inside a symbol: each study worker writes how many of its
+# plan settings it has replayed. The first pass does the setting-free work
+# for every bar (about a quarter of a symbol's time); every further setting
+# reuses it, so the first pass counts FIRST_PASS_WEIGHT settings.
+FIRST_PASS_WEIGHT = 25.0
+STALL_MINUTES = float(os.getenv("SETUP_STUDY_STALL_MINUTES", "45") or "45")
+WATCHDOG_MAX_RESTARTS = int(os.getenv("SETUP_STUDY_WATCHDOG_MAX_RESTARTS", "3") or "3")
+
+
+def _work_dir(bot: str) -> Path:
+    return LOCAL_DIR / f"{bot}_multiyear_work"
+
+
+def _work_progress(bot: str, sym: str, done: int, total: int, trades: int) -> None:
+    try:
+        d = _work_dir(bot)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{sym.replace('/', '__')}.json"
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"symbol": sym, "done": done, "total": total, "trades": trades, "updated": time.time()}),
+                       encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _symbol_fraction(done: int, total: int) -> float:
+    """How far a symbol's replay is, weighting the first (setting-free) pass."""
+    if total <= 0:
+        return 0.0
+    units = FIRST_PASS_WEIGHT + (total - 1)
+    return min((FIRST_PASS_WEIGHT * (done >= 1) + max(done - 1, 0)) / units, 1.0)
+
+
+def _work_files(bot: str) -> dict[str, dict[str, Any]]:
+    out = {}
+    for f in _work_dir(bot).glob("*.json") if _work_dir(bot).exists() else []:
+        try:
+            w = json.loads(f.read_text(encoding="utf-8"))
+            out[w["symbol"]] = w
+        except (OSError, ValueError, KeyError):
+            continue
+    return out
+
+
+def study_progress(bot: str, progress: dict[str, Any] | None, *, now: float | None = None) -> dict[str, Any]:
+    """A running study's whole picture: fraction done (finished symbols plus
+    the partial ones in flight), the symbols in flight, the last sign of
+    activity, whether it has stalled, and its estimated finish."""
+    now = time.time() if now is None else now
+    pr = progress or {}
+    total = int(pr.get("total") or 0)
+    done = int(pr.get("done") or 0)
+    stage = str(pr.get("stage") or "replaying")
+    work = {s: w for s, w in _work_files(bot).items()}
+    in_flight = [w for w in work.values() if 0 <= int(w.get("done", 0)) < int(w.get("total", 1))]
+    partial = sum(_symbol_fraction(int(w.get("done", 0)), int(w.get("total", 1))) for w in in_flight)
+    replay_fraction = min((done + partial) / total, 1.0) if total else 0.0
+    # Replays are ~95% of a study; the analysis, writing and publishing the rest.
+    post = {"analysing": 0.96, "writing": 0.98, "publishing": 0.99, "done": 1.0}
+    fraction = next((v for k, v in post.items() if stage.startswith(k)), 0.95 * replay_fraction)
+    try:
+        started = dt.datetime.fromisoformat(str(pr["started_at"])).timestamp()
+    except (KeyError, TypeError, ValueError):
+        started = None
+    elapsed = now - started if started else None
+    resumed = len(pr.get("resumed") or [])
+    this_run = fraction - (0.95 * resumed / total if total else 0.0)
+    eta = elapsed * (1.0 - fraction) / this_run if elapsed and this_run > 0.02 and fraction < 1.0 else None
+    path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
+    activity = max([w.get("updated", 0.0) for w in work.values()] + ([path.stat().st_mtime] if path.exists() else [0.0]))
+    idle = now - activity if activity else None
+    return {"fraction": round(fraction, 4), "percent": round(100 * fraction, 1), "stage": stage, "done": done, "total": total,
+            "in_flight": sorted((w["symbol"], round(_symbol_fraction(int(w.get("done", 0)), int(w.get("total", 1))), 3))
+                                for w in in_flight),
+            "trades_so_far": int(pr.get("trades_so_far") or 0) + int(sum(w.get("trades", 0) for w in in_flight)),
+            "combinations": len(grid_labels(bot)) if bot in MULTIYEAR else None, "elapsed_sec": round(elapsed) if elapsed else None,
+            "eta_sec": round(eta) if eta else None,
+            "eta_at": dt.datetime.fromtimestamp(now + eta, dt.timezone.utc).isoformat() if eta else None,
+            "idle_sec": round(idle) if idle is not None else None,
+            "stalled": bool(idle is not None and idle > STALL_MINUTES * 60), "resumed": resumed}
+
+
+def watch_studies(*, now: float | None = None) -> dict[str, Any]:
+    """The watchdog (every few minutes on the Space): a running study with no
+    sign of progress for STALL_MINUTES is stopped -- its finished symbols
+    stay saved -- so the next maybe_start relaunches it where it stopped.
+    After WATCHDOG_MAX_RESTARTS stalls in FAILED_RETRY_HOURS it is marked
+    failed instead (the normal retry backoff)."""
+    import signal
+    now = time.time() if now is None else now
+    acted: dict[str, Any] = {}
+    for bot in MULTIYEAR:
+        name = f"{bot}_multiyear"
+        if not _running(name):
+            continue
+        try:
+            pr = json.loads((LOCAL_DIR / f"{name}_progress.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pr = {}
+        sp = study_progress(bot, pr, now=now)
+        if not sp["stalled"]:
+            continue
+        pid_file = LOCAL_DIR / f"{name}.pid"
+        try:
+            pid = int(pid_file.read_text())
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            for _ in range(20):
+                if not _pid_alive(pid)[0]:
+                    break
+                time.sleep(0.5)
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (OSError, ValueError, ProcessLookupError):
+            pass
+        pid_file.unlink(missing_ok=True)
+        log_path = LOCAL_DIR / f"{name}_watchdog.json"
+        try:
+            log = json.loads(log_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log = {"restarts": []}
+        log["restarts"] = [t for t in log.get("restarts", []) if now - t < FAILED_RETRY_HOURS * 3600] + [now]
+        log_path.write_text(json.dumps(log), encoding="utf-8")
+        if len(log["restarts"]) >= WATCHDOG_MAX_RESTARTS:
+            _write_error(name, f"stalled {len(log['restarts'])} times (no progress for {STALL_MINUTES:.0f} min each); see {name}.log")
+            acted[bot] = "stalled_too_often"
+        else:
+            acted[bot] = f"stopped after {round((sp['idle_sec'] or 0) / 60)} min without progress; relaunching where it stopped"
+        logger.warning("[setup_backtest] watchdog: %s study %s", bot, acted[bot])
+    return {"ok": True, "acted": acted}
+
+
 def _rss_mb() -> float | None:
     """This process's peak memory (MB), for the study's progress record."""
     try:
@@ -1153,6 +1287,8 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
         progress_path.write_text(json.dumps(progress, default=str), encoding="utf-8")
         logger.info("[setup_backtest] %s study: %s", bot, {k: progress.get(k) for k in ("stage", "done", "elapsed_sec", "peak_mb")})
 
+    import shutil
+    shutil.rmtree(_work_dir(bot), ignore_errors=True)  # in-flight reports of an earlier run are stale
     mark()
     todo = [s for s in symbols if s not in parts]
     if todo and bot in ARCHIVE_STUDY_BOTS:
@@ -1180,6 +1316,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
                     t = pd.DataFrame()
                 parts[sym] = _one_column_each(t)
                 _save_part(bot, sym, t)
+                (_work_dir(bot) / f"{sym.replace('/', '__')}.json").unlink(missing_ok=True)
                 mark(done=len(parts), last_symbol=sym)
         finally:
             _stop_pool(pool)
@@ -1343,48 +1480,49 @@ def _study_symbols(bot: str) -> list[str]:
             else list(alpaca_options_data.OPTIONS_UNDERLYINGS))
 
 
-def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
-    """True once the SIP archive on HF holds this year's file for (nearly)
-    every symbol the study replays -- never start on a partial upload. The
-    Kalshi bots also need the Alpaca crypto and news archives complete."""
-    if bot == "crypto":
-        from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
+def archive_checks(bot: str, *, min_fraction: float = 0.98) -> list[tuple[str, bool]]:
+    """What a bot's study needs on HF before it may start (never on a
+    partial archive), each condition named for the dashboard."""
+    def check(name: str, fn) -> tuple[str, bool]:
         try:
-            tickers = [f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()]
-            return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_crypto_history.crypto_bot_ready()
-                    and alpaca_crypto_history.history_deepened()
-                    and alpaca_news_history.archive_ready() and alpaca_news_history.covers(tickers)
-                    and "SPY" not in alpaca_sip_history.missing_symbols())
+            return name, bool(fn())
         except Exception:
-            return False
-    if bot in KALSHI_STUDY_BOTS:
-        from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
-        try:
-            return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_crypto_history.history_deepened()
-                    and alpaca_news_history.archive_ready()
-                    and not set(alpaca_sip_history.commodity_etfs()) & set(alpaca_sip_history.missing_symbols()))
-        except Exception:
-            return False
-    token = os.getenv("HF_API_KEY", "")
-    if not token:
-        return False
-    try:
-        from huggingface_hub import HfApi
+            return name, False
 
-        from data import alpaca_sip_history
+    from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
+    if bot in ("crypto",) + KALSHI_STUDY_BOTS:
+        checks = [check("crypto minute bars for this year", lambda: alpaca_crypto_history.archive_ready(min_fraction=min_fraction)),
+                  check("crypto history back to 2021", alpaca_crypto_history.history_deepened),
+                  check("news archive since 2016", alpaca_news_history.archive_ready)]
+        if bot == "crypto":
+            tickers = [f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()]
+            checks += [check("every crypto-bot pair archived", alpaca_crypto_history.crypto_bot_ready),
+                       check("news for every crypto-bot pair", lambda: alpaca_news_history.covers(tickers)),
+                       check("SPY minute bars", lambda: "SPY" not in alpaca_sip_history.missing_symbols())]
+        else:
+            checks.append(check("commodity ETF minute bars",
+                                lambda: not set(alpaca_sip_history.commodity_etfs()) & set(alpaca_sip_history.missing_symbols())))
+        return checks
+
+    def sip_complete() -> bool:
+        token = os.getenv("HF_API_KEY", "")
+        if not token:
+            return False
+        from huggingface_hub import HfApi
         files = set(HfApi(token=token).list_repo_files(alpaca_sip_history.HF_REPO, repo_type="dataset"))
-    except Exception:
-        return False
-    year = dt.datetime.now(dt.timezone.utc).year
-    symbols = _study_symbols(bot)
-    present = sum(1 for s in symbols if f"bars_1m/{s}/{year}.parquet" in files and f"bars_1m/{s}/{year - 1}.parquet" in files)
-    if not (symbols and present >= min_fraction * len(symbols)):
-        return False
-    try:  # the entry-condition learning reads the news archive too, with these tickers in it
-        from data import alpaca_news_history
-        return alpaca_news_history.archive_ready() and alpaca_news_history.covers(alpaca_news_history.stock_tickers())
-    except Exception:
-        return False
+        year = dt.datetime.now(dt.timezone.utc).year
+        symbols = _study_symbols(bot)
+        present = sum(1 for s in symbols if f"bars_1m/{s}/{year}.parquet" in files and f"bars_1m/{s}/{year - 1}.parquet" in files)
+        return bool(symbols) and present >= min_fraction * len(symbols)
+
+    return [check("SIP minute bars for every symbol", sip_complete),
+            check("news archive since 2016", alpaca_news_history.archive_ready),
+            check("news for the stock and options tickers", lambda: alpaca_news_history.covers(alpaca_news_history.stock_tickers()))]
+
+
+def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
+    """True once everything the bot's study reads is complete on HF."""
+    return all(ok for _, ok in archive_checks(bot, min_fraction=min_fraction))
 
 
 def _pid_alive(pid: int) -> tuple[bool, int | None]:
@@ -1503,6 +1641,67 @@ def _needs_study(bot: str) -> str:
     return "due"
 
 
+_NEED_CACHE: dict[str, tuple[float, str, list[str]]] = {}
+NEED_CACHE_SEC = 120
+
+
+def _cached_need(bot: str) -> tuple[str, list[str]]:
+    """_needs_study for the dashboard (it reads HF listings): cached
+    NEED_CACHE_SEC, with what a waiting study still needs."""
+    hit = _NEED_CACHE.get(bot)
+    if hit and time.time() - hit[0] < NEED_CACHE_SEC:
+        return hit[1], hit[2]
+    need = _needs_study(bot)
+    missing = [name for name, ok in archive_checks(bot) if not ok] if need == "waiting_for_archive" else []
+    _NEED_CACHE[bot] = (time.time(), need, missing)
+    return need, missing
+
+
+def processing_overview(*, now: float | None = None) -> dict[str, Any]:
+    """Everything the Space is processing, for the live dashboards: each
+    bot's study in queue order (running with progress and finish estimate,
+    stalled, queued, waiting for data, failed, or up to date) and every
+    long data job."""
+    import server_common
+    now = time.time() if now is None else now
+    studies: list[dict[str, Any]] = []
+    for bot in STUDY_PRIORITY:
+        if bot not in MULTIYEAR:
+            continue
+        st = multiyear_status(bot)
+        latest = st.get("latest") or {}
+        row: dict[str, Any] = {"bot": bot, "combinations": len(grid_labels(bot)), "version": STUDY_VERSION.get(bot, 1),
+                               "last_published_at": latest.get("computed_at"), "last_seconds": latest.get("seconds")}
+        try:
+            row["watchdog_restarts"] = len(json.loads((LOCAL_DIR / f"{bot}_multiyear_watchdog.json").read_text(encoding="utf-8"))
+                                           .get("restarts", []))
+        except (OSError, ValueError):
+            row["watchdog_restarts"] = 0
+        if st.get("running"):
+            live = st.get("live") or study_progress(bot, st.get("progress"), now=now)
+            row.update(state="stalled" if live["stalled"] else "running", progress=live)
+        else:
+            need, missing = _cached_need(bot)
+            if need == "failed_recently":
+                err = LOCAL_DIR / f"{bot}_multiyear_error.json"
+                retry = err.stat().st_mtime + FAILED_RETRY_HOURS * 3600 if err.exists() else None
+                row.update(state="failed", error=(st.get("error") or {}).get("error"),
+                           retry_at=dt.datetime.fromtimestamp(retry, dt.timezone.utc).isoformat() if retry else None)
+            elif need == "already_published":
+                row.update(state="done")
+            elif need == "waiting_for_archive":
+                row.update(state="waiting", waiting_for=missing)
+            else:
+                row.update(state="queued")
+        studies.append(row)
+    running = any(r["state"] in ("running", "stalled") for r in studies)
+    queued = [r for r in studies if r["state"] == "queued"]
+    for k, r in enumerate(queued):
+        r["queue_position"] = k + 1 + (1 if running else 0)
+    return {"ok": True, "now": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(), "studies": studies,
+            "tasks": server_common.tasks(), "stall_minutes": STALL_MINUTES}
+
+
 _report_checked: dict[str, float] = {}
 
 
@@ -1560,6 +1759,9 @@ def multiyear_status(bot: str) -> dict[str, Any]:
         out["error"] = json.loads((LOCAL_DIR / f"{bot}_multiyear_error.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         out["error"] = None
+    # Live progress (fraction, symbols in flight, finish estimate, stall).
+    out["live"] = study_progress(bot, out["progress"]) if out["running"] else None
+    out["combinations"] = len(grid_labels(bot)) if bot in MULTIYEAR else None
     return out
 
 

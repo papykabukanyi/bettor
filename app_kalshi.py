@@ -1723,6 +1723,9 @@ def _ensure_background_jobs_started() -> None:
             # trained plan setting, coins with a profitable record, and the
             # entry conditions (hour, weekday, news, leader) that lost --
             # one study at a time on the Space's cores.
+            # The studies' watchdog: a study with no progress for
+            # STALL_MINUTES is stopped and relaunched where it stopped.
+            scheduler.add_job(setup_backtest_job.watch_studies, "interval", minutes=5, id="study_watchdog", replace_existing=True)
             for bot, weekday in (("perps", "sun"), ("kalshi15m", "sun")):
                 scheduler.add_job(setup_backtest_job.request_multiyear, "cron", day_of_week=weekday,
                                   hour=6 if bot == "perps" else 9, minute=0, args=[bot],
@@ -2474,6 +2477,14 @@ def api_bots_live():
     bots = bot_live_status()
     return jsonify({"ok": True, "now": dt.datetime.now(dt.timezone.utc).isoformat(), "stall_after_sec": BOT_LIVE_STALL_SEC,
                     "live_count": sum(1 for b in bots if b["live"]), "bots": bots, "hf": dict(_HF_HEALTH)})
+
+
+@app.route("/api/processing", methods=["GET"])
+def api_processing():
+    """Everything the Space is processing, live: each bot's study (progress,
+    finish estimate, stalls, queue, what it waits for) and the long data
+    jobs (archive backfills)."""
+    return jsonify(setup_backtest_job.processing_overview())
 
 
 @app.route("/api/strategy-board", methods=["GET"])

@@ -156,11 +156,14 @@ def upload(paths: list[tuple[str, int]], *, message: str) -> list[tuple[str, int
 def backfill(symbols: list[str] | None = None, *, start_year: int = START_YEAR, headers: dict[str, str] | None = None,
              merge_remote: bool = True, publish: bool = True) -> dict[str, Any]:
     """Full history per symbol, year by year (memory stays bounded)."""
+    from server_common import task_end, task_start, task_step
     symbols = symbols or universe()
     now = dt.datetime.now(dt.timezone.utc)
     written: list[tuple[str, int]] = []
     rows = 0
-    for symbol in symbols:
+    task_start("SIP minute bars", len(symbols), detail=f"every exchange, {start_year} to today")
+    for k, symbol in enumerate(symbols):
+        task_step("SIP minute bars", done=k, current=symbol)
         for year in range(start_year, now.year + 1):
             start = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
             end = min(dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc), now)
@@ -175,6 +178,7 @@ def backfill(symbols: list[str] | None = None, *, start_year: int = START_YEAR, 
             written.append((symbol, year))
             rows += len(df)
     uploaded = upload(written, message="SIP 1m bars backfill") if publish else []
+    task_end("SIP minute bars", detail=f"{len(written)} symbol-years, {rows:,} bars")
     return {"ok": True, "symbols": len(symbols), "files": len(written), "rows": rows, "uploaded": len(uploaded)}
 
 

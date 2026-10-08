@@ -157,7 +157,11 @@ def test_crypto_history_is_deepened_to_the_start_of_alpacas_data(monkeypatch):
     monkeypatch.setattr(ch, "fetch_bars", fake_fetch)
     out = ch.deepen_history()
     assert fetched == [("BTC", 2021), ("HYPE", 2021), ("HYPE", 2022), ("HYPE", 2023)]
-    assert out["files"] == 1 and out["coins_checked"] == 2 and uploads == [ch.DEEPENED_PATH]
+    # Saved coin by coin: the checked list goes up after each coin.
+    assert out["files"] == 1 and out["coins_checked"] == 2 and uploads == [ch.DEEPENED_PATH, ch.DEEPENED_PATH]
+    import server_common
+    task = next(t for t in server_common.tasks() if t["name"] == "Crypto history back to 2021")
+    assert task["state"] == "done" and task["done"] == task["total"] == 2
     monkeypatch.setattr(ch, "_deepened", lambda: {"BTC": 2021, "HYPE": 2021})
     assert ch.history_deepened()
 

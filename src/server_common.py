@@ -662,3 +662,48 @@ def app_version() -> str:
     except (OSError, ValueError, TypeError, KeyError):
         return "DOZO_V1"
 
+
+# ---------------------------------------------------------------------------
+# Long data jobs on the Space (archive backfills) report their progress here
+# so the dashboards can show it live: started, done/total, current item,
+# finished or failed.
+# ---------------------------------------------------------------------------
+TASKS: dict[str, dict[str, Any]] = {}
+_TASKS_LOCK = threading.Lock()
+
+
+def task_start(name: str, total: int, *, detail: str = "") -> None:
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    with _TASKS_LOCK:
+        TASKS[name] = {"name": name, "state": "running", "done": 0, "total": int(total), "current": None,
+                       "detail": detail, "started_at": now, "updated_at": now, "finished_at": None}
+
+
+def task_step(name: str, *, done: int | None = None, current: str | None = None, advance: int = 0) -> None:
+    with _TASKS_LOCK:
+        t = TASKS.get(name)
+        if t is None:
+            return
+        t["done"] = int(done) if done is not None else t["done"] + advance
+        if current is not None:
+            t["current"] = current
+        t["updated_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def task_end(name: str, *, ok: bool = True, detail: str | None = None) -> None:
+    with _TASKS_LOCK:
+        t = TASKS.get(name)
+        if t is None:
+            return
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        t.update(state="done" if ok else "failed", finished_at=now, updated_at=now, current=None)
+        if ok:
+            t["done"] = max(t["done"], t["total"])
+        if detail is not None:
+            t["detail"] = detail
+
+
+def tasks() -> list[dict[str, Any]]:
+    with _TASKS_LOCK:
+        return [dict(t) for t in TASKS.values()]
+

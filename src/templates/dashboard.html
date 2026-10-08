@@ -70,6 +70,17 @@
   .chip b { color: var(--muted); font-weight: 600; }
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
   .chip.ok i { background: var(--green); } .chip.bad i { background: var(--red); } .chip.warn i { background: var(--yellow); }
+  .study-live { display: none; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin: -4px 0 12px; font-size: 12.5px; }
+  .study-live.on { display: block; }
+  .study-live .row { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .study-live .muted { color: var(--muted); }
+  .pbar { height: 8px; border-radius: 999px; background: #ffffff14; overflow: hidden; }
+  .pbar > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+    background-size: 24px 24px; transition: width .6s ease; }
+  .pbar.run > span { background-image: linear-gradient(135deg, #ffffff22 25%, transparent 25%, transparent 50%, #ffffff22 50%, #ffffff22 75%, transparent 75%),
+    linear-gradient(90deg, #3b82f6, #8b5cf6); animation: pbar-move 1s linear infinite; }
+  .pbar.bad > span { background: var(--red); } .pbar.ok > span { background: var(--green); }
+  @keyframes pbar-move { from { background-position: 0 0, 0 0; } to { background-position: 24px 0, 0 0; } }
   .legend { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
   .replay-detail summary { color: var(--muted); font-size: 12px; cursor: pointer; margin: 0 0 6px; }
 </style>
@@ -127,6 +138,7 @@
 <section id="setup-evidence-section">
   <h3>Status</h3>
   <div class="status-strip" id="status-strip"><span class="chip"><i></i>loading</span></div>
+  <div class="study-live" id="study-live"></div>
   <details class="replay-detail"><summary>Replay detail &middot; last 30 days</summary>
   <div class="scroll-x">
     <table>
@@ -615,8 +627,30 @@ function statusChip(label, value, state, title) {
 }
 function statusPct(x, d = 2) { return x == null ? "--" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(d)}%`; }
 function statusAge(s) { return s == null ? "" : s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
+function studyDur(s) {
+  if (s == null) return "--";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+  return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`;
+}
+function renderStudyLive(sd) {
+  // The bot's study while it runs: a live bar, what it is doing, when it ends.
+  const el = document.getElementById("study-live");
+  if (!el) return;
+  const lv = sd && sd.running ? sd.live : null;
+  if (!lv) { el.className = "study-live"; el.innerHTML = ""; return; }
+  const flight = (lv.in_flight || []).map(([s, f]) => `${s} ${Math.round(f * 100)}%`).join(", ");
+  const finish = lv.eta_at ? `finishes ~${lv.eta_at.slice(11, 16)} UTC (in ${studyDur(lv.eta_sec)})` : "estimating finish";
+  el.className = "study-live on";
+  el.innerHTML = `<div class="row"><span><b>Study running</b> · ${setupEsc(lv.stage)} · ${lv.done}/${lv.total} symbols done${flight ? " · now: " + setupEsc(flight) : ""}</span>
+      <span><b>${lv.percent}%</b></span></div>
+    <div class="pbar ${lv.stalled ? "bad" : "run"}"><span style="width:${Math.max(1, lv.percent)}%"></span></div>
+    <div class="row muted" style="margin:6px 0 0">
+      <span>${(lv.combinations || 0).toLocaleString()} combinations · ${(lv.trades_so_far || 0).toLocaleString()} trades so far · running ${studyDur(lv.elapsed_sec)}${lv.resumed ? ` · resumed ${lv.resumed} saved symbols` : ""}</span>
+      <span>${lv.stalled ? `<b style="color:var(--red)">no progress for ${studyDur(lv.idle_sec)} -- the watchdog restarts it where it stopped</b>` : finish}</span></div>`;
+}
 function refreshStatusStudy() {
-  if (Date.now() - statusStudyAt < 60000) return;
+  if (Date.now() - statusStudyAt < 10000) return;
   statusStudyAt = Date.now();
   fetch(`/api/setup-study/${STATUS_BOT}`).then(r => r.ok ? r.json() : null).then(j => {
     statusStudy = j;
@@ -663,8 +697,15 @@ function renderStatusStrip(data, fromStudy) {
   }
   const sd = statusStudy;
   if (sd && sd.ok) {
-    if (sd.running && sd.progress) {
+    renderStudyLive(sd);
+    if (sd.running && sd.live) {
+      const lv = sd.live;
+      out.push(statusChip("Study", lv.stalled ? `stalled ${statusAge(lv.idle_sec)} -- watchdog restarts it`
+        : `${lv.percent}% · ${lv.eta_sec != null ? "done in " + studyDur(lv.eta_sec) : lv.stage}`, lv.stalled ? "bad" : "warn"));
+    } else if (sd.running && sd.progress) {
       out.push(statusChip("Study", `running ${sd.progress.done ?? 0}/${sd.progress.total ?? "?"} · ${sd.progress.trades_so_far ?? 0} tr`, "warn"));
+    } else if (sd.error) {
+      out.push(statusChip("Study", "failed -- retries after the wait", "bad", sd.error.error || ""));
     } else if (sd.latest) {
       const L = sd.latest, p = L.patterns, t = L.trained, w = L.walk_forward || {};
       const res = (p && p.with_patterns) || (t && t.out_of_sample) || w.out_of_sample || {};
