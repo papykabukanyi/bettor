@@ -66,9 +66,16 @@ def test_the_bot_enforces_patterns_only_when_they_beat_training():
     assert job._eligibility_from(result)["blocked"] == {}  # noqa: SLF001
 
 
-def test_kalshi_study_symbols_are_what_alpaca_charts():
+def test_kalshi_study_symbols_are_what_alpaca_charts(monkeypatch):
+    """Perps studies every perp the live bot scans: Kalshi's live listing,
+    each with a real Alpaca chart (never an older fixed list)."""
+    from data import perps_data
+    listing = [{"ticker": t, "status": "active"} for t in
+               ("KXBTCPERP", "KXETHPERP", "KXKSHIBPERP", "KXAAVEPERP", "KXADAPERP", "KXGOLDPERP", "KXSILVERPERP",
+                "KXPALLADIUMPERP", "KXNEARPERP")] + [{"ticker": "KXDOTPERP", "status": "inactive"}]
+    monkeypatch.setattr(perps_data, "_cached_list_margin_markets", lambda: listing)
     perps = job._study_symbols("perps")  # noqa: SLF001
-    assert {"BTC", "ETH", "SHIB", "GOLD", "SILVER"} <= set(perps) and not {"NEAR", "SUI", "ZEC"} & set(perps)
+    assert perps == ["AAVE", "ADA", "BTC", "ETH", "GOLD", "PALLADIUM", "SHIB", "SILVER"]  # NEAR: no Alpaca chart; DOT delisted
     k15 = job._study_symbols("kalshi15m")  # noqa: SLF001
     assert {"BTC", "ADA", "GOLD", "WTI", "NATGAS"} <= set(k15) and "NEAR" not in k15
     assert (1.5, 3.0) in job.study_grid("perps") and (0.5, 2.0) in job.study_grid("kalshi15m")

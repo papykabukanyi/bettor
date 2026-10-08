@@ -520,6 +520,7 @@ def test_the_perps_study_charges_the_median_spread_not_one_moments_book(monkeypa
     for a perp the archive lacks)."""
     from data import kalshi_perps, perps_data, perps_strategy
     monkeypatch.setattr(perps_data, "typical_spread_bps", lambda: {"KXADAPERP": 9.9})
+    monkeypatch.setattr(perps_data, "chartable_tickers", lambda: ["KXADAPERP", "KXGOLDPERP"])
     monkeypatch.setattr(perps_strategy, "setup_fee_rate_roundtrip", lambda ticker: 0.0008)
     monkeypatch.setattr(kalshi_perps, "get_margin_market", lambda ticker: {"market": {"bid": "0.0001", "ask": "0.25"}})
     costs = job._kalshi_study_costs("perps", ["ADA", "GOLD"])  # noqa: SLF001

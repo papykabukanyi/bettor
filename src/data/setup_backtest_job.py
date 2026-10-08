@@ -843,7 +843,7 @@ def _kalshi_study_costs(bot: str, symbols: list[str]) -> dict[str, dict[str, flo
         from data.kalshi_perps import KNOWN_PERP_TICKERS, get_margin_market
         from data.perps_data import coin_for_ticker
         tickers = {kalshi_15m_spot.chart_coin(coin_for_ticker(t)): t for t in KNOWN_PERP_TICKERS}
-        tickers.update({c: f"KX{c}PERP" for c in ("GOLD", "SILVER")})
+        tickers.update({kalshi_15m_spot.chart_coin(coin_for_ticker(t)): t for t in perps_data.chartable_tickers()})
         # Every year is charged the perp's median recorded spread -- never one
         # moment's book, which can be pulled (a study once read ADA at
         # 20,000 bps and so never traded it).
@@ -1511,11 +1511,11 @@ def study_grid(bot: str) -> list[tuple[float, float]]:
 
 def _study_symbols(bot: str) -> list[str]:
     if bot == "perps":
-        from data import kalshi_15m_spot
-        from data.kalshi_perps import KNOWN_PERP_TICKERS
-        from data.perps_data import coin_for_ticker
-        coins = {kalshi_15m_spot.chart_coin(coin_for_ticker(t)) for t in KNOWN_PERP_TICKERS}
-        return sorted(c for c in coins if c in kalshi_15m_spot.SPOT_PRODUCTS) + ["GOLD", "SILVER"]
+        # Every perp the live bot scans (Kalshi's live listing, each with a
+        # real Alpaca chart), read on its own chart -- never an older fixed
+        # list, which missed AAVE, ADA and the PGMs and kept delisted DOT.
+        from data import kalshi_15m_spot, perps_data
+        return sorted({kalshi_15m_spot.chart_coin(perps_data.coin_for_ticker(t)) for t in perps_data.chartable_tickers()})
     if bot == "crypto":
         # Every coin the crypto bot can trade, read as its /USD pair on the
         # Alpaca archive (pairs quoted in USDT/USDC chart the same coin).
