@@ -935,6 +935,16 @@ def _setup_news(coin: str) -> tuple[float | None, float | None]:
 WINDOW_SEC = 900
 
 
+def setup_risk_per_trade_pct() -> float:
+    """The budget a setup trade risks at its stop: RISK_PER_TRADE_PCT, and
+    RISK_PER_TRADE_PCT_PROVEN while the multi-year study's rule is in force
+    (it won on years it never saw)."""
+    from data import kalshi_15m_setup, setup_backtest_job
+    elig = setup_backtest_job.eligibility("kalshi15m")
+    return float(kalshi_15m_setup.RISK_PER_TRADE_PCT_PROVEN if elig and elig.get("enforce")
+                 else kalshi_15m_setup.RISK_PER_TRADE_PCT)
+
+
 def _setup_min_seconds_to_close() -> float:
     """An entry comes in by the window's minute ENTRY_MAX_MINUTE (the study's
     entry window; the default minute 5 = 10 minutes left)."""
@@ -1966,6 +1976,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
             from data import kalshi_15m_setup
             risk_contracts = kalshi_15m_setup.risk_sized_contracts(
                 budget_usd=budget_usd, risk_per_contract_usd=float(decision["contract_plan"]["risk"]),
+                risk_pct_of_budget=setup_risk_per_trade_pct(),
             )
             if risk_contracts < 1:
                 checks.append({"coin": coin, "ok": False, "reason": "setup_risk_budget_below_one_contract",

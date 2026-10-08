@@ -262,9 +262,13 @@ def strategy_board() -> list[dict[str, Any]]:
                                "params": params, "symbols": elig.get("symbols") if enforce else "all",
                                "blocked": (elig.get("blocked") or {}) if enforce else {}}
         if bot == "kalshi15m":
-            from data import kalshi_15m_setup
+            from data import kalshi_15m_setup, kalshi_15m_signal_study
             row["sides"] = list(kalshi_15m_setup.SIDES)
             row["min_price_edge"] = price_edge_min()
+            try:
+                row["signal_study"] = kalshi_15m_signal_study.summary()
+            except Exception as exc:
+                logger.debug("[setup_backtest] signal study summary unavailable: %s", exc)
         elif bot in MULTIYEAR:
             row["sides"] = list(MULTIYEAR[bot]["sides"])
         st = multiyear_status(bot) if bot in MULTIYEAR else {}
@@ -1751,8 +1755,14 @@ def processing_overview(*, now: float | None = None) -> dict[str, Any]:
     queued = [r for r in studies if r["state"] == "queued"]
     for k, r in enumerate(queued):
         r["queue_position"] = k + 1 + (1 if running else 0)
-    return {"ok": True, "now": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(), "studies": studies,
-            "tasks": server_common.tasks(), "stall_minutes": STALL_MINUTES}
+    out = {"ok": True, "now": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(), "studies": studies,
+           "tasks": server_common.tasks(), "stall_minutes": STALL_MINUTES}
+    try:
+        from data import kalshi_15m_signal_study
+        out["signal_study"] = kalshi_15m_signal_study.overview_row(now)
+    except Exception as exc:  # the panel never fails over one row
+        logger.debug("[setup_backtest] signal study row unavailable: %s", exc)
+    return out
 
 
 _report_checked: dict[str, float] = {}

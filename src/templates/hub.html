@@ -308,6 +308,21 @@
       `<span class="alarm">${procEsc(String(r.error || "").slice(0, 160))}</span><br>retries at ${hhmm(r.retry_at)} · ${last}`);
     return procRow(name, "done", "up to date", 100, "ok", `${last} · ${combos}${wd}`);
   }
+  function signalRow(r) {
+    const last = r.last_published_at ? `last run ${hhmm(r.last_published_at)} ${r.last_published_at.slice(5, 10)}${r.last_seconds ? ` (${dur(r.last_seconds)})` : ""}` : "never run yet";
+    const a = r.adopted || {}, b = r.best;
+    const verdict = a.enforce ? `<b>adopted: ${procEsc(a.family)}</b>` : `nothing adopted${a.reason ? " (" + procEsc(a.reason) + ")" : ""}`;
+    const best = b ? ` · best held-out: ${procEsc(b.family)} ${b.trades} trades, ${b.avg != null ? (b.avg * 100).toFixed(1) + "&cent;/trade" : "--"}, t ${b.t_clustered ?? "--"}` : "";
+    if (r.state === "running" || r.state === "stalled") {
+      const p = r.progress || {};
+      return procRow(r.name, r.state, r.state === "stalled" ? "stalled" : procEsc(p.stage || "running"), p.percent ?? 0, r.state === "stalled" ? "bad" : "run",
+        `<b>${p.done ?? 0}/${p.total ?? "?"}</b> model runs scored on held-out weeks · running ${dur(p.elapsed_sec)} · last step ${dur(p.idle_sec)} ago`);
+    }
+    if (r.state === "failed") return procRow(r.name, "failed", "failed", 0, "bad",
+      `<span class="alarm">${procEsc(String(r.error || "").slice(-160))}</span><br>retries at ${hhmm(r.retry_at)} · ${last}`);
+    if (r.state === "due") return procRow(r.name, "queued", "due", null, "", `starts when no study is using the cores · ${last}`);
+    return procRow(r.name, "done", "up to date", 100, "ok", `${last} · ${r.windows} windows over ${r.weeks} weeks · ${verdict}${best}`);
+  }
   function taskRow(t) {
     const pct = t.total ? 100 * t.done / t.total : (t.state === "done" ? 100 : 0);
     if (t.state === "running") return procRow(t.name, "running", "running", pct, "run",
@@ -324,7 +339,8 @@
     const tasks = (d.tasks || []).filter(t => t.state === "running" || (Date.now() - Date.parse(t.finished_at || 0)) < 12 * 3600e3);
     document.getElementById("proc-wrap").innerHTML =
       `<div class="proc-group">Data jobs</div>` + (tasks.length ? tasks.map(taskRow).join("") : `<div class="proc-row proc-detail">No data job running right now.</div>`) +
-      `<div class="proc-group">Studies (one at a time, in this order)</div>` + (d.studies || []).map(studyRow).join("");
+      `<div class="proc-group">Studies (one at a time, in this order)</div>` + (d.studies || []).map(studyRow).join("") +
+      (d.signal_study ? `<div class="proc-group">15m new-signal study (weekly, scored on held-out weeks)</div>` + signalRow(d.signal_study) : "");
   }
   refreshProcessing();
   setInterval(refreshProcessing, 5000);
@@ -353,11 +369,13 @@
       const edge = b.min_price_edge != null ? ` · price edge &ge; ${(b.min_price_edge * 100).toFixed(0)}&cent;` : "";
       const blocked = Object.entries(b.blocked || {}).map(([f, v]) => `${f}&ne;${v.join("/")}`).join(", ");
       const trades = `${boardEsc(b.rule)}${sides}${edge}<br><span style="color:var(--muted)">${b.source === "defaults" ? "setup defaults" : "learned (" + boardEsc(b.source) + ")"}${Array.isArray(b.symbols) ? " · " + b.symbols.length + " symbols" : ""}${blocked ? " · skips " + boardEsc(blocked) : ""}</span>`;
+      const ss = b.signal_study, sa = (ss && ss.adopted) || {};
+      const sig = ss && (ss.computed_at || ss.running) ? `<br><span style="color:var(--muted)">new-signal study: ${ss.running ? "running" : sa.enforce ? "<span class=\"pos\">adopted " + boardEsc(sa.family) + "</span>" : "nothing adopted"}${ss.windows ? " · " + ss.windows + " windows, " + ss.weeks + " weeks" : ""}</span>` : "";
       const study = st.running ? `running ${(st.progress || {}).done ?? 0}/${(st.progress || {}).total ?? "?"}`
         : st.error ? `<span class="neg">failed</span>` : u.trades ? `<span class="${u.avg > 0 ? "pos" : "neg"}">${boardAvg(u.avg, "return")}/tr</span> · ${u.trades} tr · ${st.positive_years ?? 0}/${st.test_years ?? 0} yrs up` : "--";
       const replay = rp.trades ? `<span class="${rp.avg > 0 ? "pos" : "neg"}">${boardAvg(rp.avg, rp.unit)}/tr</span> · ${rp.trades} tr · ${rp.days}d` : (rp.ok === false ? "failed" : "--");
       const dec = dc.after_close_sec != null ? `${dc.after_close_sec}s after close · ${dc.have}/${dc.of} bars` : "--";
-      return `<tr><td><strong>${BOARD_NAME[b.bot] || b.bot}</strong></td><td>${trades}</td><td>${study}</td><td>${replay}</td><td>${dec}</td></tr>`;
+      return `<tr><td><strong>${BOARD_NAME[b.bot] || b.bot}</strong></td><td>${trades}${sig}</td><td>${study}</td><td>${replay}</td><td>${dec}</td></tr>`;
     }).join("");
   }
   refreshBoard();

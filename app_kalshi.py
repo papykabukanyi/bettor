@@ -1734,6 +1734,13 @@ def _ensure_background_jobs_started() -> None:
                                   id=f"{bot}_multiyear_startup", replace_existing=True,
                                   next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
                                       minutes=int(os.getenv("SETUP_MULTIYEAR_KALSHI_STARTUP_DELAY_MIN", "30") or "30")))
+            # The 15m bot's new-signal study (weekly, scored on held-out
+            # weeks): checked every 30 minutes, runs when due and no
+            # multi-year study is using the cores.
+            from data import kalshi_15m_signal_study
+            scheduler.add_job(kalshi_15m_signal_study.maybe_start, "interval", minutes=30, id="kalshi15m_signal_study",
+                              replace_existing=True, next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
+                                  minutes=int(os.getenv("KALSHI_15M_SIGNAL_STUDY_STARTUP_DELAY_MIN", "15") or "15")))
             for bot, (hour, minute, startup_delay_min) in (("perps", (3, 10, 10)), ("kalshi15m", (3, 40, 40))):
                 scheduler.add_job(_run_setup_backtest, "cron", hour=hour, minute=minute, args=[bot],
                                   id=f"{bot}_setup_backtest", replace_existing=True)
@@ -2206,7 +2213,7 @@ def api_status():
         "params": {
             "entry_system": perps_strategy.ENTRY_SYSTEM,
             "setup_min_rr": perps_setup.MIN_RR,
-            "setup_risk_per_trade_pct": perps_setup.RISK_PER_TRADE_PCT,
+            "setup_risk_per_trade_pct": perps_strategy.setup_risk_per_trade_pct(),
             "setup_fee_rate_roundtrip_default": perps_strategy.DEFAULT_TAKER_FEE_RATE * 2,
             "position_size_pct": effective_params["position_size_pct"],
             "max_concurrent_positions": effective_params["max_concurrent_positions"],
@@ -2327,7 +2334,7 @@ def api_kalshi_15m_status():
             "ev_entry_max_minute": kalshi_15m_edge_model.EV_ENTRY_MAX_MINUTE,
             "ev_require_certified": kalshi_15m_strategy.EV_REQUIRE_CERTIFIED,
             "setup_min_rr": kalshi_15m_setup.MIN_RR,
-            "setup_risk_per_trade_pct": kalshi_15m_setup.RISK_PER_TRADE_PCT,
+            "setup_risk_per_trade_pct": kalshi_15m_strategy.setup_risk_per_trade_pct(),
             "edge_model_hour_et": KALSHI_15M_EDGE_MODEL_HOUR_ET,
         },
         # Real observability gap this closes: neither of these ever

@@ -3164,6 +3164,22 @@ def test_setup_scan_enters_sized_by_planned_risk_and_ignores_model_era_gates(set
     assert _SETUP["setup_id"] in state["setup_ids_traded"]
 
 
+def test_15m_risks_more_per_trade_only_while_its_study_rule_is_in_force(setup_mode, monkeypatch):
+    """User decision 2026-10-08: 1% of the budget at the stop, 2% while the
+    multi-year study's rule is in force -- the same rule as perps."""
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": False})
+    assert kalshi_15m_strategy.setup_risk_per_trade_pct() == 0.01
+    monkeypatch.setattr(setup_backtest_job, "eligibility", lambda bot: {"enforce": True, "symbols": ["BTC"], "params": None})
+    assert kalshi_15m_strategy.setup_risk_per_trade_pct() == 0.02
+    monkeypatch.setattr(kalshi_15m_strategy, "ACTIVE_ENTRY_COINS", frozenset({"BTC"}))
+    monkeypatch.setattr(kalshi_15m_strategy, "_account_budget_usd", lambda: 1000.0)
+    kalshi_15m_strategy.scan_and_enter(dry_run=True)
+    position = kalshi_15m_strategy._load_state()["positions"][0]  # noqa: SLF001
+    risk = position["setup_contract_plan"]["risk"]
+    assert position["count"] == min(int(1000.0 * kalshi_15m_strategy.POSITION_SIZE_PCT / position["entry_price"]), int(20.0 // risk))
+
+
 def _open_setup_position(monkeypatch, *, dry_run=True):
     kalshi_15m_strategy._save_state({  # noqa: SLF001
         "positions": [{

@@ -93,6 +93,9 @@ MIN_RR = _env_float("KALSHI_15M_SETUP_MIN_RR", 2.0)
 MIN_RISK_PCT = _env_float("KALSHI_15M_SETUP_MIN_RISK_PCT", 0.001)
 MAX_RISK_PCT = _env_float("KALSHI_15M_SETUP_MAX_RISK_PCT", 0.03)
 RISK_PER_TRADE_PCT = _env_float("KALSHI_15M_SETUP_RISK_PER_TRADE_PCT", 0.01)  # budget lost if the stop is hit
+# User decision 2026-10-08: risk more per trade while the multi-year study's
+# rule is in force (it won on years it never saw) -- as perps does.
+RISK_PER_TRADE_PCT_PROVEN = _env_float("KALSHI_15M_SETUP_RISK_PER_TRADE_PCT_PROVEN", 0.02)
 NEWS_BLOCK = _env_float("KALSHI_15M_SETUP_NEWS_BLOCK", 0.3)
 # Buying NO on a short setup lost money in every one of the 11 years of the
 # multi-year study (-31% of the price per trade over 307 trades) while
