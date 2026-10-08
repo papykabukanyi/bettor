@@ -397,10 +397,25 @@ class _SettingFreeCache:
 
     def __enter__(self):
         self.module.evaluate = self
+        # The same chart is prepared once for every setting replayed on it
+        # (indicators, 5m/15m frames, VWAP: seconds per year of minutes).
+        self.prepare_original = self.module.prepare
+        prepared: dict[tuple, Any] = {}
+
+        def prepare(df1, *a, **kw):
+            ts = df1["ts"].to_numpy("int64") if len(df1) else None
+            key = (len(df1), int(ts[0]) if ts is not None else None, int(ts[-1]) if ts is not None else None,
+                   float(df1["close"].iloc[-1]) if len(df1) else None, a, tuple(sorted(kw.items())))
+            if key not in prepared:
+                prepared[key] = self.prepare_original(df1, *a, **kw)
+            return prepared[key]
+
+        self.module.prepare = prepare
         return self
 
     def __exit__(self, *exc):
         self.module.evaluate = self.original
+        self.module.prepare = self.prepare_original
 
 
 def _multiyear_symbol(args: tuple) -> pd.DataFrame:
@@ -446,7 +461,7 @@ def _multiyear_symbol(args: tuple) -> pd.DataFrame:
 KALSHI_STUDY_BOTS = ("perps", "kalshi15m")
 # Bots whose multi-year study replays Alpaca's minute-bar archives with the
 # entry-condition learning (the Kalshi bots and the Alpaca crypto bot).
-ARCHIVE_STUDY_BOTS = KALSHI_STUDY_BOTS + ("crypto",)
+ARCHIVE_STUDY_BOTS = KALSHI_STUDY_BOTS + ("crypto", "stocks", "options")
 MULTIYEAR.update({
     # lookback 0: each year's choices are learned from every year before it
     # (the whole archive, expanding), not only the last one.
@@ -454,6 +469,11 @@ MULTIYEAR.update({
     "kalshi15m": {"module": "kalshi_15m_setup", "sides": ("long",), "lookback": 0},  # buying NO lost every year
     # Alpaca crypto is spot: long only, every pair it trades.
     "crypto": {"module": "alpaca_crypto_setup", "sides": ("long",), "lookback": 0},
+    # Stocks and options on the SIP archive since 2016, with the same
+    # every-prior-year learning, settings and entry conditions (news since
+    # 2016 included) as the other bots.
+    "stocks": {"module": "alpaca_setup", "sides": ("long",), "lookback": 0},
+    "options": {"module": "alpaca_options_setup", "sides": ("long", "short"), "lookback": 0},
 })
 # The Kalshi bots search a wider plan grid: every stop distance x every
 # minimum reward/risk (16 settings), each crossed with every coin and the
@@ -545,9 +565,11 @@ def blocked_reason(blocked: dict[str, list[str]] | None, features: dict[str, str
     return None
 
 
-def _study_candles(sym: str) -> tuple[pd.DataFrame, str]:
+def _study_candles(sym: str, bot: str | None = None) -> tuple[pd.DataFrame, str]:
     """(1-minute candles with ts = END, session) from Alpaca's archives."""
     from data import alpaca_crypto_history, alpaca_setup, alpaca_sip_history, kalshi_15m_setup
+    if bot in ("stocks", "options"):
+        return alpaca_setup.regular_session_candles(alpaca_sip_history.load(sym)), "us_equity"
     if sym in kalshi_15m_setup.METAL_CHART_SYMBOL:
         return alpaca_setup.regular_session_candles(alpaca_sip_history.load(kalshi_15m_setup.METAL_CHART_SYMBOL[sym])), "us_equity"
     return alpaca_crypto_history.candles(sym.split("/")[0].upper()), "utc_day"
@@ -675,14 +697,13 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
 
     from data import alpaca_news, alpaca_news_history
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
-    candles, session = _study_candles(sym)
+    candles, session = _study_candles(sym, bot)
     if candles.empty:
         return pd.DataFrame()
     lead_sym = m.leader_for(sym)
-    lead, lead_session = _study_candles(lead_sym)
-    archive = alpaca_news_history.load()
-    news_idx = alpaca_news_history.NewsIndex(archive, alpaca_news.news_symbols(sym)) if not archive.empty else None
-    del archive
+    lead, lead_session = _study_candles(lead_sym, bot)
+    # Only this asset's articles, read month by month (small in memory).
+    news_idx = alpaca_news_history.index_for(alpaca_news.news_symbols(sym))
     from data import alpaca_setup, alpaca_sip_history
     spy = alpaca_setup.regular_session_candles(alpaca_sip_history.load("SPY"))
     default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
@@ -699,6 +720,10 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
         elif bot == "crypto":
             t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
                          spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym)
+        elif bot in ("stocks", "options"):
+            t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
+                         spread_bps=cost["spread_bps"], entry_allowed=m.entry_allowed, force_exit=m.must_be_flat,
+                         leader_df=lead if not lead.empty else None, leader_symbol=lead_sym)
         else:
             t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead if not lead.empty else None,
                                  leader_symbol=lead_sym, session=session, leader_session=lead_session,
@@ -720,6 +745,10 @@ def _kalshi_study_costs(bot: str, symbols: list[str]) -> dict[str, dict[str, flo
     1-5 in the Kalshi quote archive (the overall median for coins without
     quotes yet)."""
     costs: dict[str, dict[str, float]] = {}
+    if bot in ("stocks", "options"):
+        import importlib
+        m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+        return {sym: {"fee_rate_roundtrip": 0.0, "spread_bps": float(m.SPREAD_BPS)} for sym in symbols}
     if bot == "crypto":
         from data import alpaca_client, alpaca_crypto_setup, alpaca_crypto_strategy
         fee = 2 * float(alpaca_crypto_strategy.TAKER_FEE_RATE)
@@ -1094,9 +1123,9 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     if todo and bot in ARCHIVE_STUDY_BOTS:
         # Archives to local disk once, before the workers read them.
         from data import alpaca_news_history
-        alpaca_news_history.load()
+        alpaca_news_history.index_for([])  # every month on local disk once, before the workers read it
         for sym in sorted(set(todo) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in todo}):
-            _study_candles(sym)
+            _study_candles(sym, bot)
         costs = _kalshi_study_costs(bot, todo)
         from data import alpaca_sip_history
         alpaca_sip_history.load("SPY")
@@ -1238,7 +1267,9 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 # a published study of an older version is re-run on the next start check.
 # perps 2 / kalshi15m 3: every prior year (expanding), side and volatility
 # regime learned too; kalshi15m 2: settles on Kalshi's reference.
-STUDY_VERSION = {"perps": 3, "kalshi15m": 4}
+# Bumped together on 2026-10-08: every bot re-studies its whole history
+# (crypto from Jan 2021) on the faster replay; stocks/options on the full method.
+STUDY_VERSION = {"perps": 4, "kalshi15m": 5, "crypto": 2, "stocks": 2, "options": 2}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
@@ -1286,6 +1317,7 @@ def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
         try:
             tickers = [f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()]
             return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_crypto_history.crypto_bot_ready()
+                    and alpaca_crypto_history.history_deepened()
                     and alpaca_news_history.archive_ready() and alpaca_news_history.covers(tickers)
                     and "SPY" not in alpaca_sip_history.missing_symbols())
         except Exception:
@@ -1293,7 +1325,8 @@ def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
     if bot in KALSHI_STUDY_BOTS:
         from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history
         try:
-            return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_news_history.archive_ready()
+            return (alpaca_crypto_history.archive_ready(min_fraction=min_fraction) and alpaca_crypto_history.history_deepened()
+                    and alpaca_news_history.archive_ready()
                     and not set(alpaca_sip_history.commodity_etfs()) & set(alpaca_sip_history.missing_symbols()))
         except Exception:
             return False
@@ -1310,7 +1343,13 @@ def archive_ready(bot: str, *, min_fraction: float = 0.98) -> bool:
     year = dt.datetime.now(dt.timezone.utc).year
     symbols = _study_symbols(bot)
     present = sum(1 for s in symbols if f"bars_1m/{s}/{year}.parquet" in files and f"bars_1m/{s}/{year - 1}.parquet" in files)
-    return bool(symbols) and present >= min_fraction * len(symbols)
+    if not (symbols and present >= min_fraction * len(symbols)):
+        return False
+    try:  # the entry-condition learning reads the news archive too, with these tickers in it
+        from data import alpaca_news_history
+        return alpaca_news_history.archive_ready() and alpaca_news_history.covers(alpaca_news_history.stock_tickers())
+    except Exception:
+        return False
 
 
 def _pid_alive(pid: int) -> tuple[bool, int | None]:

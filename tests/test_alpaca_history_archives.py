@@ -122,3 +122,55 @@ def test_the_crypto_bots_coins_join_the_archive_without_blocking_the_kalshi_stud
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
     assert ch.missing_coins() == ["AVAX"]  # UNI is known to have no bars on this venue
     assert ch.archive_ready() is True and ch.crypto_bot_ready() is False  # Kalshi coins complete; AVAX still to come
+
+
+def test_crypto_history_is_deepened_to_the_start_of_alpacas_data(monkeypatch):
+    """Alpaca's Kraken US bars begin January 2021: every stored coin gets
+    its earlier years once (a coin listed later simply has none)."""
+    import huggingface_hub
+    monkeypatch.setenv("HF_API_KEY", "token")
+    assert ch.START_YEAR == 2021
+    files = ["bars_1m/BTC/2022.parquet", "bars_1m/BTC/2023.parquet", "bars_1m/HYPE/2024.parquet"]
+    uploads, fetched = [], []
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, repo, repo_type=None):
+            return files
+
+        def upload_file(self, **kw):
+            uploads.append(kw["path_in_repo"])
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(ch, "_deepened", lambda: {})
+    monkeypatch.setattr(ch, "upload", lambda paths, message: list(paths))
+
+    def fake_fetch(coin, start, end):
+        fetched.append((coin, start.year))
+        if coin == "BTC":
+            return pd.DataFrame({"ts": [int(start.timestamp())], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+                                 "volume": [1.0], "trade_count": [1.0], "vwap": [1.0]})
+        return pd.DataFrame(columns=ch.COLUMNS)  # HYPE didn't trade there yet
+
+    monkeypatch.setattr(ch, "fetch_bars", fake_fetch)
+    out = ch.deepen_history()
+    assert fetched == [("BTC", 2021), ("HYPE", 2021), ("HYPE", 2022), ("HYPE", 2023)]
+    assert out["files"] == 1 and out["coins_checked"] == 2 and uploads == [ch.DEEPENED_PATH]
+    monkeypatch.setattr(ch, "_deepened", lambda: {"BTC": 2021, "HYPE": 2021})
+    assert ch.history_deepened()
+
+
+def test_a_study_worker_reads_only_its_own_news(monkeypatch):
+    """The archive grows with every bot's tickers: a worker keeps only its
+    asset's article times and scores, month by month."""
+    import datetime as dt
+    monkeypatch.setattr(nh, "_months", lambda start_year: [(2024, 1), (2024, 2)])
+    for key, rows in (("2024-01", [(1, "AAPL,MSFT", 0.5), (2, "TSLA", -1.0)]), ("2024-02", [(3, "AAPL", 1.0)])):
+        nh._write(key, pd.DataFrame([{"id": i, "created_at": int(dt.datetime(2024, 1, 15).timestamp()) + i * 86400 * 20,  # noqa: SLF001
+                                       "headline": "h", "summary": "s", "symbols": sy, "source": "b", "url": "u", "score": sc}
+                                      for i, sy, sc in rows]))
+    idx = nh.index_for(["AAPL"])
+    assert len(idx.t) == 2 and idx.cum_score[-1] == pytest.approx(1.5)
+    assert "AAPL" in nh.universe() and set(nh.stock_tickers()) <= set(nh.universe())

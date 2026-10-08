@@ -31,6 +31,7 @@ LOCAL_DIR = Path(os.getenv("ALPACA_NEWS_HISTORY_DIR", str(ROOT_DIR / "data" / "a
 START_YEAR = int(os.getenv("ALPACA_NEWS_HISTORY_START_YEAR", "2016") or "2016")
 FILES_PER_COMMIT = 24
 SYMBOLS_PER_REQUEST = 40
+FETCH_THREADS = int(os.getenv("ALPACA_NEWS_FETCH_THREADS", "8") or "8")
 COLUMNS = ["id", "created_at", "headline", "summary", "symbols", "source", "url", "score"]
 
 
@@ -44,10 +45,17 @@ def base_universe() -> list[str]:
     return sorted(syms | {"SPY", "QQQ"})
 
 
+def stock_tickers() -> list[str]:
+    """The stock bot's universe and the options bot's underlyings."""
+    from data import alpaca_data, alpaca_options_data
+    return sorted(set(alpaca_data.BROAD_CANDIDATE_UNIVERSE) | set(alpaca_options_data.OPTIONS_UNDERLYINGS) | {"SPY", "QQQ"})
+
+
 def universe() -> list[str]:
-    """base_universe plus the Alpaca crypto bot's coins (BTCUSD-style)."""
+    """base_universe plus the Alpaca crypto bot's coins (BTCUSD-style) and
+    the stock and options bots' tickers -- every bot's studies read news."""
     from data import alpaca_crypto_history
-    return sorted(set(base_universe()) | {f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()})
+    return sorted(set(base_universe()) | {f"{c}USD" for c in alpaca_crypto_history.crypto_bot_coins()} | set(stock_tickers()))
 
 
 MANIFEST = "news/_symbols.json"
@@ -207,31 +215,39 @@ def backfill(*, start_year: int = START_YEAR, refresh_recent: int = 2) -> dict[s
     stored -- those tickers' articles merged into every stored month.
     Uploaded in batches as it goes; the manifest is written last, so an
     interrupted run picks up again."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     on_hf = _hf_files()
     months = _months(start_year)
     wanted = universe()
     added = sorted(set(wanted) - set(covered_symbols()))
     recent = {_month_key(y, m) for y, m in months[-refresh_recent:]}
-    written, uploaded, articles = [], [], 0
+    tasks = []
     for y, m in months:
         key = _month_key(y, m)
         stored = _repo_path(key) in on_hf
         if stored and key not in recent and not added:
             continue
-        symbols = added if stored and key not in recent else wanted
-        try:
-            df = fetch_month(y, m, symbols=symbols)
-        except Exception as exc:
-            logger.warning("[alpaca_news_history] %s failed: %s", key, exc)
-            continue
-        merged = _merge(key, df) if stored else df
-        _write(key, merged)
-        written.append(key)
-        articles += len(df)
-        if len(written) - len(uploaded) >= FILES_PER_COMMIT:
-            uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
+        tasks.append((y, m, key, stored, added if stored and key not in recent else wanted))
+    written, uploaded, articles, failed = [], [], 0, 0
+    # Months fetched FETCH_THREADS at a time (network-bound; Alpaca's
+    # Algo Trader Plus allows far more requests than this makes).
+    with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
+        futures = {pool.submit(fetch_month, y, m, symbols=syms): (key, stored) for y, m, key, stored, syms in tasks}
+        for fut in as_completed(futures):
+            key, stored = futures[fut]
+            try:
+                df = fut.result()
+            except Exception as exc:
+                logger.warning("[alpaca_news_history] %s failed: %s", key, exc)
+                failed += 1
+                continue
+            _write(key, _merge(key, df) if stored else df)
+            written.append(key)
+            articles += len(df)
+            if len(written) - len(uploaded) >= FILES_PER_COMMIT:
+                uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
     uploaded += upload(written[len(uploaded):], message="Alpaca news archive")
-    if len(uploaded) == len(written) and _hf_token():
+    if not failed and len(uploaded) == len(written) and _hf_token():
         import json
 
         from huggingface_hub import HfApi
@@ -284,6 +300,36 @@ def load(*, start_year: int = START_YEAR, end_year: int | None = None) -> pd.Dat
     if not frames:
         return pd.DataFrame(columns=COLUMNS)
     return pd.concat(frames, ignore_index=True).drop_duplicates("id").sort_values("created_at").reset_index(drop=True)
+
+
+def index_for(symbols: list[str], *, start_year: int = START_YEAR) -> "NewsIndex":
+    """One asset's NewsIndex read month by month from the stored archive --
+    only its own articles' time and score are kept, so a study worker's
+    memory stays small however large the archive grows."""
+    wanted = {s.upper() for s in symbols}
+    parts = []
+    for y, m in _months(start_year):
+        key = _month_key(y, m)
+        path = _local_path(key)
+        if not path.exists() and _hf_token():
+            try:
+                from huggingface_hub import hf_hub_download
+                src = hf_hub_download(HF_REPO, _repo_path(key), repo_type="dataset", token=_hf_token())
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(f".{os.getpid()}.tmp")
+                pd.read_parquet(src).to_parquet(tmp, index=False)
+                os.replace(tmp, path)
+            except Exception:
+                continue
+        if not path.exists():
+            continue
+        df = pd.read_parquet(path, columns=["id", "created_at", "symbols", "score"])
+        mine = df[df["symbols"].apply(lambda v: bool(wanted & set(str(v).split(","))))]
+        if not mine.empty:
+            parts.append(mine)
+    frame = (pd.concat(parts, ignore_index=True).drop_duplicates("id") if parts
+             else pd.DataFrame(columns=["id", "created_at", "symbols", "score"]))
+    return NewsIndex(frame, symbols)
 
 
 class NewsIndex:

@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 HF_REPO = os.getenv("HF_ALPACA_CRYPTO_REPO", "papylove/alpaca-crypto-minute-bars")
 ROOT_DIR = Path(__file__).resolve().parents[2]
 LOCAL_DIR = Path(os.getenv("ALPACA_CRYPTO_HISTORY_DIR", str(ROOT_DIR / "data" / "alpaca_crypto_history")))
-START_YEAR = int(os.getenv("ALPACA_CRYPTO_HISTORY_START_YEAR", "2022") or "2022")
+# Alpaca's Kraken US crypto bars begin January 2021: the archive holds all of it.
+START_YEAR = int(os.getenv("ALPACA_CRYPTO_HISTORY_START_YEAR", "2021") or "2021")
 FILES_PER_COMMIT = 40
 COLUMNS = ["ts", "open", "high", "low", "close", "volume", "trade_count", "vwap"]
 
@@ -54,6 +55,8 @@ def all_coins() -> list[str]:
 
 
 NO_DATA_PATH = "bars_1m/_no_data.json"
+# Per coin, the first year its history was checked back to (deepen_history).
+DEEPENED_PATH = "bars_1m/_history_start.json"
 
 
 def _no_data_coins() -> set[str]:
@@ -222,6 +225,79 @@ def backfill_missing() -> dict[str, Any]:
         except Exception as exc:
             logger.warning("[alpaca_crypto_history] could not record no-data coins: %s", exc)
     return {**result, "missing": missing, "no_data": empty}
+
+
+def _deepened() -> dict[str, int]:
+    token = _hf_token()
+    if not token:
+        return {}
+    try:
+        import json
+
+        from huggingface_hub import hf_hub_download
+        return json.loads(Path(hf_hub_download(HF_REPO, DEEPENED_PATH, repo_type="dataset", token=token)).read_text())
+    except Exception:
+        return {}
+
+
+def _stored_years(files: set[str]) -> dict[str, list[int]]:
+    years: dict[str, list[int]] = {}
+    for f in files:
+        parts = f.split("/")
+        if len(parts) == 3 and parts[0] == "bars_1m" and parts[2].endswith(".parquet") and parts[2][:4].isdigit():
+            years.setdefault(parts[1], []).append(int(parts[2][:4]))
+    return {c: sorted(v) for c, v in years.items()}
+
+
+def deepen_history(*, start_year: int = START_YEAR) -> dict[str, Any]:
+    """Every stored coin's years before its earliest file, back to
+    start_year -- once per coin (DEEPENED_PATH); a coin listed later simply
+    has no bars for the earlier years."""
+    token = _hf_token()
+    if not token:
+        return {"ok": False, "error": "no HF token"}
+    import json
+
+    from huggingface_hub import HfApi
+    api = HfApi(token=token)
+    stored = _stored_years(set(api.list_repo_files(HF_REPO, repo_type="dataset")))
+    done = _deepened()
+    written: list[tuple[str, int]] = []
+    checked: dict[str, int] = {}
+    for coin, years in sorted(stored.items()):
+        if done.get(coin, 10**4) <= start_year:
+            continue
+        for year in range(start_year, years[0]):
+            start = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
+            try:
+                df = fetch_bars(coin, start, dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc))
+            except Exception as exc:
+                logger.warning("[alpaca_crypto_history] %s %s failed: %s", coin, year, exc)
+                break  # retried on the next run (not marked checked)
+            if not df.empty:
+                write_year(coin, year, df, merge_remote=False)
+                written.append((coin, year))
+        else:
+            checked[coin] = start_year
+    uploaded = upload(written, message=f"Alpaca Kraken US 1m bars: history back to {start_year}")
+    if checked and len(uploaded) == len(written):
+        api.upload_file(path_or_fileobj=json.dumps({**done, **checked}, sort_keys=True).encode(), path_in_repo=DEEPENED_PATH,
+                        repo_id=HF_REPO, repo_type="dataset", commit_message="crypto history checked back to the start")
+    return {"ok": True, "files": len(written), "uploaded": len(uploaded), "coins_checked": len(checked)}
+
+
+def history_deepened(*, start_year: int = START_YEAR) -> bool:
+    """True once every stored coin's history was checked back to start_year."""
+    token = _hf_token()
+    if not token:
+        return False
+    try:
+        from huggingface_hub import HfApi
+        stored = _stored_years(set(HfApi(token=token).list_repo_files(HF_REPO, repo_type="dataset")))
+    except Exception:
+        return False
+    done = _deepened()
+    return bool(stored) and all(done.get(c, 10**4) <= start_year or years[0] <= start_year for c, years in stored.items())
 
 
 def crypto_bot_ready() -> bool:

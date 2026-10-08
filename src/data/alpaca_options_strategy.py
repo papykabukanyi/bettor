@@ -328,11 +328,12 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
                 "setup_valid": False, "setup_reason": "eligibility", "reason": f"not eligible: {detail}",
                 "setup_checks": {"data": {"ok": False, "detail": f"not eligible: {detail}"}}}
 
+    news, news_count = None, None
     try:
-        news = alpaca_news.sentiment(symbol).get("sentiment_score")
+        news_info = alpaca_news.sentiment(symbol)
+        news, news_count = news_info.get("sentiment_score"), news_info.get("headline_volume")
     except Exception as exc:
         logger.debug("[alpaca_options_strategy] sentiment read failed for %s: %s", symbol, exc)
-        news = None
     try:
         setup = alpaca_options_setup.live_setup(symbol, news_score=news)
     except Exception as exc:
@@ -351,6 +352,10 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
     if setup["setup_id"] in traded_setup_ids:
         result["reason"] = f"{setup['setup']} already traded ({setup['setup_id']})"
         return result
+    why = _learned_losing_condition(elig, symbol, setup["side"], news, news_count, setup, result)
+    if why:
+        result["reason"] = f"{setup['setup']} {setup['side']} on {symbol}: skipped, the study found this condition loses ({why})"
+        return result
     plan = setup["plan"]
     direction = "up" if setup["side"] == "long" else "down"
     result.update(
@@ -359,6 +364,30 @@ def evaluate_setup_candidate(symbol: str, *, traded_setup_ids: frozenset[str] = 
                 f"reward/risk {plan['rr_net']:.2f} -- buying the {'call' if direction == 'up' else 'put'} side"),
     )
     return result
+
+
+def _learned_losing_condition(elig: dict[str, Any] | None, symbol: str, side: str, news: float | None,
+                              news_count: float | None, setup: dict[str, Any], result: dict[str, Any]) -> str | None:
+    """While the multi-year study's learned conditions are in force: the one
+    this entry falls in (hour, weekday, news, leader, side, volatility, US
+    market), else None. The entry's conditions are kept on the result."""
+    from data import alpaca_data, alpaca_options_setup, setup_backtest_job
+    enforce = bool(elig and elig.get("enforce"))
+    blocked = (elig.get("blocked") or {}) if enforce else {}
+    corr = (setup.get("checks") or {}).get("correlation") or {}
+    regime = "n/a"
+    thresholds = ((elig or {}).get("vol_thresholds") or {}).get(symbol)
+    if thresholds and "vol_regime" in blocked:
+        try:
+            regime = setup_backtest_job.vol_regime_now(
+                alpaca_options_setup.regular_session_candles(alpaca_data.fetch_recent_minute_bars(symbol)), thresholds, "us_equity")
+        except Exception as exc:
+            logger.debug("[alpaca_options_strategy] volatility regime unavailable for %s: %s", symbol, exc)
+    result["entry_conditions"] = setup_backtest_job.pattern_features(
+        ts=int(time.time()), side=side, news_count=news_count, news_score=news, leader_corr=corr.get("corr"),
+        leader_dir=corr.get("leader_dir"), vol_regime=regime,
+        us_market=setup_backtest_job.us_market_now() if "us_market" in blocked else None)
+    return setup_backtest_job.blocked_reason(blocked, result["entry_conditions"])
 
 
 def evaluate_candidate(

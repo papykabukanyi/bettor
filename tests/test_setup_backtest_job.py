@@ -151,8 +151,8 @@ def test_a_study_starts_only_on_a_complete_archive_and_one_at_a_time(monkeypatch
     monkeypatch.setattr(job, "_running", lambda name: name == "stocks_multiyear")
     assert job.maybe_start_multiyear("options")["action"] == "a_study_is_running"
     monkeypatch.setattr(job, "_running", lambda name: False)
-    grid = [f"{a}:{b}" for a, b in job.PARAM_GRID]
-    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False, "grid": grid})
+    grid = job.grid_labels("stocks")
+    monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False, "grid": grid, "version": job.STUDY_VERSION["stocks"]})
     assert job.maybe_start_multiyear("stocks")["action"] == "already_published"
     # A study run without the current training grid is re-run with it.
     monkeypatch.setattr(job, "eligibility", lambda bot: {"enforce": False})

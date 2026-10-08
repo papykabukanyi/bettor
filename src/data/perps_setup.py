@@ -250,7 +250,13 @@ class Context:
     session: str = "utc_day"
 
     def mirrored(self) -> "Context":
-        return Context(self.f5.mirrored(), self.f15.mirrored(), self.ts1, -self.vwap, self.step5, self.step15, self.session)
+        """The chart flipped for the short side -- built once per chart (it
+        copies the whole history; per evaluation it made replays quadratic)."""
+        cached = self.__dict__.get("_mirror")
+        if cached is None:
+            cached = Context(self.f5.mirrored(), self.f15.mirrored(), self.ts1, -self.vwap, self.step5, self.step15, self.session)
+            self.__dict__["_mirror"] = cached
+        return cached
 
 
 def prepare(df1: pd.DataFrame, *, session: str = "utc_day") -> Context:
@@ -284,6 +290,8 @@ def _zones(f15: Frame, idx: np.ndarray, atr15: float, *, use: str = "high") -> l
             z["pivots"].append(i)
         else:
             zones.append({"low": price, "high": price, "touches": 1, "pivots": [i]})
+    for z in zones:  # confirmed once its last pivot's right side has printed
+        z["formed_at"] = int(max(f15.ts[p + PIVOT_RIGHT] for p in z["pivots"]))
     return zones
 
 
@@ -377,7 +385,7 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
     support = _zones(f15, np.array([i for i in lows if i >= lookback_from], dtype=int), atr15, use="low")
 
     def formed_before(z: dict[str, Any], ts: int) -> bool:
-        return max(f15.ts[p + PIVOT_RIGHT] for p in z["pivots"]) <= ts
+        return z["formed_at"] <= ts
 
     def avg_volume(k: int) -> float:
         return float(np.mean(f5.volume[max(0, k - VOLUME_LOOKBACK_5M):k])) if k > 0 else 0.0
@@ -431,8 +439,9 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
             return {"valid": False, "reason": name, "setup": "breakout_retest", "checks": checks}
 
         found = None
+        by_height = sorted(resistance, key=lambda z: -z["high"])
         for k in range(last, max(last - BREAKOUT_LOOKBACK_5M, 1) - 1, -1):
-            for z in sorted(resistance, key=lambda z: -z["high"]):
+            for z in by_height:
                 if formed_before(z, int(f5.ts[k]) - ctx.step5) and f5.close[k] > z["high"] >= f5.close[k - 1]:
                     found = (k, z)
                     break
@@ -476,11 +485,13 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
             return {"valid": False, "reason": name, "setup": "failed_breakdown", "checks": checks}
 
         found = None
+        by_depth = sorted(support, key=lambda z: z["low"])
         for r in range(last, max(last - BREAKOUT_LOOKBACK_5M, 1) - 1, -1):
-            for z in sorted(support, key=lambda z: z["low"]):
+            for z in by_depth:
+                if not (f5.close[r] > z["high"] >= f5.close[r - 1]):
+                    continue  # no reclaim at r: no breakdown before it can qualify
                 for k in range(r - 1, max(r - FAIL_WINDOW_5M, 1) - 1, -1):
-                    if (formed_before(z, int(f5.ts[k]) - ctx.step5) and f5.close[k] < z["low"] <= f5.close[k - 1]
-                            and f5.close[r] > z["high"] >= f5.close[r - 1]):
+                    if formed_before(z, int(f5.ts[k]) - ctx.step5) and f5.close[k] < z["low"] <= f5.close[k - 1]:
                         found = (k, r, z)
                         break
                 if found:
@@ -589,7 +600,11 @@ def data_coverage(ctx: Context, as_of: int) -> dict[str, Any]:
     # Only the window's slice of the (sorted) history: O(log n), not O(n).
     lo = int(np.searchsorted(ctx.ts1, as_of - COVERAGE_WINDOW_MIN * 60, side="right"))
     hi = int(np.searchsorted(ctx.ts1, as_of, side="right"))
-    present = int(np.isin(ends, ctx.ts1[lo:hi]).sum())
+    window = ctx.ts1[lo:hi]
+    if ctx.session != "us_equity" and as_of % 60 == 0 and not (window % 60).any():
+        present = int(hi - lo)  # every minute-aligned candle in (as_of - window, as_of] is one expected minute
+    else:
+        present = int(np.isin(ends, window).sum())
     coverage = present / expected
     ok = coverage >= MIN_COVERAGE
     return {"ok": ok, "coverage": round(coverage, 3), "expected_minutes": expected, "present_minutes": present,

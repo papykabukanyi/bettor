@@ -872,6 +872,10 @@ def _alpaca_archives_backfill() -> None:
         logger.info("[app_kalshi] Alpaca crypto archive backfill: %s", alpaca_crypto_history.backfill_missing())
     except Exception as exc:
         logger.warning("[app_kalshi] Alpaca crypto archive backfill failed: %s", exc)
+    try:  # every coin back to the start of Alpaca's crypto history (Jan 2021)
+        logger.info("[app_kalshi] Alpaca crypto history deepened: %s", alpaca_crypto_history.deepen_history())
+    except Exception as exc:
+        logger.warning("[app_kalshi] Alpaca crypto history deepening failed: %s", exc)
     try:
         logger.info("[app_kalshi] Alpaca news archive backfill: %s", alpaca_news_history.backfill())
     except Exception as exc:

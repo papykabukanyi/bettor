@@ -77,17 +77,19 @@ def test_kalshi_study_symbols_are_what_alpaca_charts():
     assert len(job.study_grid("perps")) == 28 and (4.0, 3.0) in job.study_grid("perps")
     assert len(job.grid_labels("perps")) == 168 and job.default_param("perps") in job.grid_labels("perps")
     assert "1.5:3.0:8.0:1.0" in job.grid_labels("perps")
-    assert job.study_grid("stocks") == list(job.PARAM_GRID)
+    # Stocks and options study the same 16 settings as the Kalshi bots, on every prior year.
+    assert job.study_grid("stocks") == job.study_grid("kalshi15m") or len(job.study_grid("stocks")) >= 16
+    assert job.MULTIYEAR["stocks"]["lookback"] == 0 and "stocks" in job.ARCHIVE_STUDY_BOTS
 
 
 def test_a_kalshi_study_symbol_is_replayed_per_setting_and_annotated(monkeypatch):
     from data import alpaca_news_history, perps_setup
     candles = pd.read_parquet(__import__("pathlib").Path(__file__).parent / "fixtures" / "setup_btc_1m.parquet")
-    monkeypatch.setattr(job, "_study_candles", lambda sym: (candles, "utc_day"))
+    monkeypatch.setattr(job, "_study_candles", lambda sym, bot=None: (candles, "utc_day"))
     t0 = int(candles.ts.iloc[-1])
-    monkeypatch.setattr(alpaca_news_history, "load", lambda **kw: pd.DataFrame(
-        {"id": [1], "created_at": [t0 - 600], "headline": [""], "summary": [""], "symbols": ["BTCUSD"], "source": [""],
-         "url": [""], "score": [0.5]}))
+    news = pd.DataFrame({"id": [1], "created_at": [t0 - 600], "headline": [""], "summary": [""], "symbols": ["BTCUSD"],
+                         "source": [""], "url": [""], "score": [0.5]})
+    monkeypatch.setattr(alpaca_news_history, "index_for", lambda symbols: alpaca_news_history.NewsIndex(news, symbols))
 
     def fake_replay(df, **kw):
         assert kw["session"] == "utc_day" and kw["leader_symbol"] == "ETH"
@@ -283,8 +285,8 @@ def test_perps_exit_rules_are_replayed_on_the_same_entries(monkeypatch):
 def test_a_perps_study_trade_carries_its_full_setting(monkeypatch):
     from data import alpaca_news_history, perps_setup
     candles = pd.read_parquet(__import__("pathlib").Path(__file__).parent / "fixtures" / "setup_btc_1m.parquet")
-    monkeypatch.setattr(job, "_study_candles", lambda sym: (candles, "utc_day"))
-    monkeypatch.setattr(alpaca_news_history, "load", lambda **kw: pd.DataFrame())
+    monkeypatch.setattr(job, "_study_candles", lambda sym, bot=None: (candles, "utc_day"))
+    monkeypatch.setattr(alpaca_news_history, "index_for", lambda symbols: None)
     t0 = int(candles.ts.iloc[-1])
     seen = []
 
@@ -298,3 +300,24 @@ def test_a_perps_study_trade_carries_its_full_setting(monkeypatch):
     assert seen == [[(h * 60.0, b) for h, b in job.PERPS_EXITS]]
     assert sorted(out.param) == sorted(job._param_label(1.5, 3.0, h, b) for h, b in job.PERPS_EXITS)  # noqa: SLF001
     assert job._param_values("2.5:3.0:8.0:1.0") == {"STOP_BUFFER_ATR15": 2.5, "MIN_RR": 3.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 1.0}  # noqa: SLF001
+
+
+def test_a_stock_study_symbol_is_replayed_on_sip_with_its_session_rules(monkeypatch):
+    """Stocks and options run the same full-history study as the other
+    bots: SIP regular session, the module's session rules, every setting,
+    each trade with its entry conditions."""
+    from data import alpaca_news_history, alpaca_setup
+    candles = pd.read_parquet(__import__("pathlib").Path(__file__).parent / "fixtures" / "setup_btc_1m.parquet")
+    seen = []
+    monkeypatch.setattr(job, "_study_candles", lambda sym, bot=None: seen.append((sym, bot)) or (candles, "us_equity"))
+    monkeypatch.setattr(alpaca_news_history, "index_for", lambda symbols: None)
+    t0 = int(candles.ts.iloc[-1])
+
+    def fake_replay(df, **kw):
+        assert kw["entry_allowed"] is alpaca_setup.entry_allowed and kw["force_exit"] is alpaca_setup.must_be_flat
+        return pd.DataFrame([{"entry_ts": t0, "side": "long", "net_return": 0.01, "leader_corr": 0.9, "leader_dir": "up"}])
+
+    monkeypatch.setattr(alpaca_setup, "replay", fake_replay)
+    out = job._multiyear_kalshi_symbol(("stocks", "AAPL", [(0.5, 2.0), (1.0, 3.0)], {"fee_rate_roundtrip": 0.0, "spread_bps": 2.0}))  # noqa: SLF001
+    assert sorted(out.param) == ["0.5:2.0", "1.0:3.0"] and {"hour_block", "weekday", "us_market"} <= set(out.columns)
+    assert ("AAPL", "stocks") in seen and (alpaca_setup.leader_for("AAPL"), "stocks") in seen
