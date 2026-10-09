@@ -2535,6 +2535,20 @@ def api_setup_backtest(bot: str):
                     "latest": setup_backtest_job.latest(bot)})
 
 
+@app.route("/api/study-progress/<bot>", methods=["POST"])
+def api_study_progress(bot: str):
+    """A study running on an HF Job reports its progress here (every 30 s),
+    so this Space's dashboards show its live bar. Only with the shared
+    study secret the Space handed the job."""
+    secret = os.getenv("CRON_SECRET", "")
+    if bot not in setup_backtest_job.MULTIYEAR:
+        return jsonify({"ok": False, "error": "unknown bot"}), 404
+    if not secret or request.headers.get("X-Study-Secret", "") != secret:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    setup_backtest_job.receive_progress(bot, request.get_json(silent=True) or {})
+    return jsonify({"ok": True})
+
+
 @app.route("/api/approach-study", methods=["GET"])
 def api_approach_study():
     """Every ticker x timeframe x approach, walk-forward over the whole clean

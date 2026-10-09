@@ -298,8 +298,10 @@
       const end = r.state === "stalled"
         ? `<span class="alarm">no progress for ${dur(p.idle_sec)} -- the watchdog stops it and relaunches it where it stopped</span>`
         : (p.eta_at ? `finishes <b>~${hhmm(p.eta_at)}</b> (in ${dur(p.eta_sec)})` : "estimating finish&hellip;");
+      const rn = r.runner || {};
+      const where = rn.kind === "hf_job" ? ` · on an HF Job ${procEsc(rn.flavor)} (${rn.cpus} vCPU, $${rn.usd_per_hour}/h)` : (rn.cpus ? ` · on the Space (${rn.cpus} workers)` : "");
       return procRow(name, r.state, r.state === "stalled" ? "stalled" : procEsc(p.stage || "running"), p.percent ?? 0, r.state === "stalled" ? "bad" : "run",
-        `<b>${p.done}/${p.total}</b> symbols done${flight ? " · now: " + flight : ""} · ${combos} · ${(p.trades_so_far || 0).toLocaleString()} trades so far · running ${dur(p.elapsed_sec)}${p.resumed ? ` · resumed ${p.resumed} saved` : ""}<br>${end}${wd}`);
+        `<b>${p.done}/${p.total}</b> symbols done${flight ? " · now: " + flight : ""} · ${combos} · ${(p.trades_so_far || 0).toLocaleString()} trades so far · running ${dur(p.elapsed_sec)}${p.resumed ? ` · resumed ${p.resumed} saved` : ""}${where}<br>${end}${wd}`);
     }
     if (r.state === "queued") return procRow(name, "queued", `queued #${r.queue_position}`, null, "", `${combos} · starts when the study ahead finishes · ${last}${wd}`);
     if (r.state === "waiting") return procRow(name, "waiting", "waiting for data", null, "wait",

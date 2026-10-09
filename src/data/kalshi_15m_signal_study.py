@@ -502,7 +502,7 @@ def overview_row(now: float | None = None) -> dict[str, Any]:
         pct = 100.0 * float(p.get("done") or 0) / float(p.get("total") or 1)
         row.update(state="stalled" if idle > 45 * 60 else "running",
                    progress={"stage": p.get("stage"), "done": p.get("done"), "total": p.get("total"), "percent": round(pct, 1),
-                             "elapsed_sec": elapsed, "idle_sec": idle})
+                             "elapsed_sec": elapsed, "idle_sec": max(0.0, idle)})
         return row
     err = _local_dir() / f"{NAME}_error.json"
     if err.exists() and now - err.stat().st_mtime < 6 * 3600:

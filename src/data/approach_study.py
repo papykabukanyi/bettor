@@ -582,7 +582,7 @@ def overview_row(now: float | None = None) -> dict[str, Any]:
         row.update(state="stalled" if now - float(p.get("updated_at") or now) > 45 * 60 else "running",
                    progress={"stage": p.get("stage"), "done": p.get("done"), "total": p.get("total"),
                              "percent": round(100 * done / total, 1), "elapsed_sec": elapsed, "eta_sec": eta,
-                             "idle_sec": now - float(p.get("updated_at") or now), "last_symbol": p.get("last_symbol")})
+                             "idle_sec": max(0.0, now - float(p.get("updated_at") or now)), "last_symbol": p.get("last_symbol")})
         return row
     err = _local_dir() / f"{NAME}_error.json"
     if err.exists() and now - err.stat().st_mtime < 3 * 3600:

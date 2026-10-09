@@ -143,7 +143,7 @@
     background-size: 24px 24px; transition: width .6s ease; }
   .pbar.run > span { background-image: linear-gradient(135deg, #ffffff22 25%, transparent 25%, transparent 50%, #ffffff22 50%, #ffffff22 75%, transparent 75%),
     linear-gradient(90deg, #3b82f6, #8b5cf6); animation: pbar-move 1s linear infinite; }
-  .pbar.bad > span { background: var(--red); } .pbar.ok > span { background: var(--green); }
+  .pbar.bad > span { background: var(--red); } .pbar.ok > span { background: var(--green); } .pbar.wait > span { background: #f59e0b; }
   @keyframes pbar-move { from { background-position: 0 0, 0 0; } to { background-position: 24px 0, 0 0; } }
   .legend { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
   .replay-detail summary { color: var(--muted); font-size: 12px; cursor: pointer; margin: 0 0 6px; }
@@ -889,21 +889,55 @@ function studyDur(s) {
   const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
   return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m`;
 }
-function renderStudyLive(sd) {
-  // The bot's study while it runs: a live bar, what it is doing, when it ends.
+let procStudy = null, procSignal = null, procAppr = null;
+function studyRunner(r) {
+  const j = r && r.runner;
+  if (!j) return "";
+  return j.kind === "hf_job" ? `on an HF Job · ${setupEsc(j.flavor)} (${j.cpus} vCPU · $${j.usd_per_hour}/h)` : `on the Space (${j.cpus} workers)`;
+}
+function renderStudyLive() {
+  // This bot's study, always on screen: running (live bar, symbols in flight,
+  // where it runs, finish), queued, waiting for data, failed or up to date.
   const el = document.getElementById("study-live");
   if (!el) return;
-  const lv = sd && sd.running ? sd.live : null;
-  if (!lv) { el.className = "study-live"; el.innerHTML = ""; return; }
-  const flight = (lv.in_flight || []).map(([s, f]) => `${s} ${Math.round(f * 100)}%`).join(", ");
-  const finish = lv.eta_at ? `finishes ~${lv.eta_at.slice(11, 16)} UTC (in ${studyDur(lv.eta_sec)})` : "estimating finish";
+  const r = procStudy;
+  if (!r) { el.className = "study-live"; el.innerHTML = ""; return; }
+  const last = r.last_published_at ? `last finished ${r.last_published_at.slice(5, 16).replace("T", " ")} UTC${r.last_seconds ? " (" + studyDur(r.last_seconds) + " run)" : ""}` : "not finished yet";
+  const combos = `${(r.combinations || 0).toLocaleString()} combinations`;
+  let head, pct = 0, cls = "", left = "", right = "";
+  if (r.state === "running" || r.state === "stalled") {
+    const p = r.progress || {};
+    const flight = (p.in_flight || []).map(([s, f]) => `${s} ${Math.round(f * 100)}%`).join(", ");
+    pct = p.percent ?? 0; cls = r.state === "stalled" ? "bad" : "run";
+    head = `<b>Study running</b> ${studyRunner(r)} · ${setupEsc(p.stage || "")} · ${p.done ?? 0}/${p.total ?? "?"} symbols done${flight ? " · now: " + setupEsc(flight) : ""}`;
+    left = `${combos} · ${(p.trades_so_far || 0).toLocaleString()} trades so far · running ${studyDur(p.elapsed_sec)}${p.resumed ? ` · resumed ${p.resumed} saved symbols` : ""}`;
+    right = r.state === "stalled" ? `<b style="color:var(--red)">no progress for ${studyDur(p.idle_sec)} -- the watchdog restarts it where it stopped</b>`
+      : (p.eta_at ? `finishes ~${p.eta_at.slice(11, 16)} UTC (in ${studyDur(p.eta_sec)})` : "estimating finish");
+  } else if (r.state === "queued") {
+    head = `<b>Study queued #${r.queue_position}</b> · starts when the study ahead finishes`; left = combos; right = last;
+  } else if (r.state === "waiting") {
+    cls = "wait"; head = `<b>Study waiting for data</b> · needs ${setupEsc((r.waiting_for || []).join(", "))}`; left = combos; right = last;
+  } else if (r.state === "failed") {
+    cls = "bad"; head = `<b style="color:var(--red)">Study failed</b> · retries ${r.retry_at ? r.retry_at.slice(11, 16) + " UTC" : "soon"}`;
+    left = setupEsc(String(r.error || "").slice(-160)); right = last;
+  } else {
+    pct = 100; cls = "ok"; head = `<b>Study up to date</b> · ${combos}`; left = `version ${r.version}`; right = last;
+  }
+  const extra = [];
+  if (STATUS_BOT === "kalshi15m" && procSignal) {
+    const sp = procSignal.progress || {};
+    extra.push(`new-signal study: ${procSignal.state === "running" ? "running " + (sp.percent ?? 0) + "%" : setupEsc(procSignal.state)}${procSignal.adopted && procSignal.adopted.enforce ? " · adopted " + setupEsc(procSignal.adopted.family) : " · nothing adopted yet"}`);
+  }
+  if (procAppr) {
+    const ap = procAppr.progress || {};
+    const n = (procAppr.adoptable || {})[STATUS_BOT];
+    extra.push(`every-ticker timeframe study: ${procAppr.state === "running" ? "running " + (ap.percent ?? 0) + "%" : setupEsc(procAppr.state)}${n != null ? ` · ${n} of this bot's tickers have an approach that cleared the bar` : ""}`);
+  }
   el.className = "study-live on";
-  el.innerHTML = `<div class="row"><span><b>Study running</b> · ${setupEsc(lv.stage)} · ${lv.done}/${lv.total} symbols done${flight ? " · now: " + setupEsc(flight) : ""}</span>
-      <span><b>${lv.percent}%</b></span></div>
-    <div class="pbar ${lv.stalled ? "bad" : "run"}"><span style="width:${Math.max(1, lv.percent)}%"></span></div>
-    <div class="row muted" style="margin:6px 0 0">
-      <span>${(lv.combinations || 0).toLocaleString()} combinations · ${(lv.trades_so_far || 0).toLocaleString()} trades so far · running ${studyDur(lv.elapsed_sec)}${lv.resumed ? ` · resumed ${lv.resumed} saved symbols` : ""}</span>
-      <span>${lv.stalled ? `<b style="color:var(--red)">no progress for ${studyDur(lv.idle_sec)} -- the watchdog restarts it where it stopped</b>` : finish}</span></div>`;
+  el.innerHTML = `<div class="row"><span>${head}</span><span><b>${pct}%</b></span></div>
+    <div class="pbar ${cls}"><span style="width:${pct ? Math.max(1, pct) : 0}%"></span></div>
+    <div class="row muted" style="margin:6px 0 0"><span>${left}</span><span>${right}</span></div>` +
+    (extra.length ? `<div class="row muted" style="margin:4px 0 0"><span>${extra.join(" · ")}</span></div>` : "");
 }
 function refreshStatusStudy() {
   if (Date.now() - statusStudyAt < 10000) return;
@@ -911,6 +945,13 @@ function refreshStatusStudy() {
   fetch(`/api/setup-study/${STATUS_BOT}`).then(r => r.ok ? r.json() : null).then(j => {
     statusStudy = j;
     if (statusLast) renderStatusStrip(statusLast, true);
+  }).catch(() => {});
+  fetch("/api/processing", { cache: "no-store" }).then(r => r.ok ? r.json() : null).then(d => {
+    if (!d || !d.ok) return;
+    procStudy = (d.studies || []).find(r => r.bot === STATUS_BOT) || null;
+    procSignal = d.signal_study || null;
+    procAppr = d.approach_study || null;
+    renderStudyLive();
   }).catch(() => {});
 }
 function renderStatusStrip(data, fromStudy) {
@@ -953,7 +994,7 @@ function renderStatusStrip(data, fromStudy) {
   }
   const sd = statusStudy;
   if (sd && sd.ok) {
-    renderStudyLive(sd);
+    renderStudyLive();
     if (sd.running && sd.live) {
       const lv = sd.live;
       out.push(statusChip("Study", lv.stalled ? `stalled ${statusAge(lv.idle_sec)} -- watchdog restarts it`

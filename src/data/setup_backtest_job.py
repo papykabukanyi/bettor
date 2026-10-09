@@ -24,6 +24,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1171,6 +1172,14 @@ def watch_studies(*, now: float | None = None) -> dict[str, Any]:
         sp = study_progress(bot, pr, now=now)
         if not sp["stalled"]:
             continue
+        info = job_info(name)
+        if info:
+            try:
+                from huggingface_hub import HfApi
+                HfApi(token=os.getenv("HF_API_KEY", "")).cancel_job(job_id=info["job_id"])
+            except Exception as exc:
+                logger.warning("[setup_backtest] could not cancel stalled job %s: %s", info.get("job_id"), exc)
+            (LOCAL_DIR / f"{name}.job").unlink(missing_ok=True)
         pid_file = LOCAL_DIR / f"{name}.pid"
         try:
             pid = int(pid_file.read_text())
@@ -1327,7 +1336,10 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     import importlib
 
     cfg = MULTIYEAR[bot]
-    symbols = _study_symbols(bot)
+    # On an HF Job the Space hands over the symbols and their costs (they
+    # need live Kalshi/Alpaca reads, and the job carries no trading keys).
+    plan = json.loads(os.getenv("STUDY_PLAN") or "{}")
+    symbols = list(plan.get("symbols") or []) or _study_symbols(bot)
     grid = study_grid(bot)
     started = time.time()
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -1356,7 +1368,7 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
         alpaca_news_history.index_for([])  # every month on local disk once, before the workers read it
         for sym in sorted(set(todo) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in todo}):
             _study_candles(sym, bot)
-        costs = _kalshi_study_costs(bot, todo)
+        costs = _plan_costs(bot, todo, plan)
         from data import alpaca_sip_history
         alpaca_sip_history.load("SPY")
         jobs = {sym: (_multiyear_kalshi_symbol, (bot, sym, grid, costs[sym])) for sym in todo}
@@ -1625,6 +1637,8 @@ def _write_error(name: str, error: str) -> None:
 
 
 def _running(name: str) -> bool:
+    if (LOCAL_DIR / f"{name}.job").exists():
+        return _remote_running(name)
     pid_file = LOCAL_DIR / f"{name}.pid"
     if not pid_file.exists():
         return False
@@ -1647,6 +1661,171 @@ def _running(name: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Studies on HF Jobs (user 2026-10-09: "use all fast HF resource to process
+# all the study faster"): each due study runs as its own job on its own
+# machine, all at once, from the Space's own image (the exact deployed
+# code); the Space keeps its cores for trading. The job reports its
+# progress back to the Space (the dashboards' bars), publishes its result
+# to HF as before, and is capped by a timeout. Off when the Space can't
+# launch jobs (then the studies run on the Space, one at a time).
+# ---------------------------------------------------------------------------
+STUDY_JOBS = (os.getenv("SETUP_STUDY_JOBS", "1" if os.getenv("SPACE_ID") else "0") or "0") == "1"
+JOB_FLAVORS = {"stocks": "cpu-performance", "perps": "cpu-xl", "kalshi15m": "cpu-xl", "crypto": "cpu-xl", "options": "cpu-xl"}
+FLAVOR_CPUS = {"cpu-basic": 2, "cpu-upgrade": 8, "cpu-xl": 16, "cpu-performance": 32}
+FLAVOR_USD_PER_HOUR = {"cpu-basic": 0.01, "cpu-upgrade": 0.03, "cpu-xl": 1.00, "cpu-performance": 1.90}
+JOB_TIMEOUT = {"stocks": "4h"}
+JOB_TIMEOUT_DEFAULT = "3h"
+_job_stage_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def _plan_costs(bot: str, todo: list[str], plan: dict[str, Any]) -> dict[str, Any]:
+    """The study's costs: the Space's plan when it covers every symbol
+    (a job can't read live spreads), else read now."""
+    planned = plan.get("costs") or {}
+    if todo and all(sym in planned for sym in todo):
+        return {sym: planned[sym] for sym in todo}
+    return _kalshi_study_costs(bot, todo)
+
+
+def job_flavor(bot: str) -> str:
+    return os.getenv(f"SETUP_STUDY_JOB_FLAVOR_{bot.upper()}", JOB_FLAVORS.get(bot, "cpu-xl")) or "cpu-xl"
+
+
+def study_plan(bot: str) -> dict[str, Any]:
+    """What a job needs that only the Space can read: the bot's symbols
+    (Kalshi's live listing for perps) and their costs (live spreads)."""
+    symbols = _study_symbols(bot)
+    return {"symbols": symbols, "costs": _kalshi_study_costs(bot, symbols) if bot in ARCHIVE_STUDY_BOTS else None}
+
+
+def _space_variables() -> dict[str, str]:
+    """The Space's own (non-secret) variables, so a job studies with the
+    same settings the bots trade with."""
+    try:
+        from huggingface_hub import HfApi
+        got = HfApi(token=os.getenv("HF_API_KEY", "")).get_space_variables(os.getenv("SPACE_ID", ""))
+        return {k: str(v.value) for k, v in got.items() if v.value is not None}
+    except Exception as exc:
+        logger.warning("[setup_backtest] space variables unavailable for a study job: %s", exc)
+        return {}
+
+
+def launch_remote(bot: str) -> dict[str, Any]:
+    """Run this bot's study as an HF Job (its own machine)."""
+    from huggingface_hub import HfApi
+    name = f"{bot}_multiyear"
+    token, space = os.getenv("HF_API_KEY", ""), os.getenv("SPACE_ID", "")
+    if not token or not space:
+        return {"ok": False, "action": "jobs_unavailable"}
+    flavor = job_flavor(bot)
+    env = {**_space_variables(), "SETUP_MULTIYEAR_WORKERS": str(FLAVOR_CPUS.get(flavor, 8)), "PYTHONUNBUFFERED": "1",
+           "STUDY_PLAN": json.dumps(study_plan(bot)), "SETUP_STUDY_JOBS": "0"}
+    host = os.getenv("SPACE_HOST", "")
+    if host:
+        env["STUDY_PROGRESS_URL"] = f"https://{host}/api/study-progress/{bot}"
+    secrets = {"HF_API_KEY": token}
+    if os.getenv("CRON_SECRET"):
+        secrets["STUDY_RELAY_SECRET"] = os.getenv("CRON_SECRET", "")
+    job = HfApi(token=token).run_job(image=f"hf.co/spaces/{space}", command=["bash", "-c", f"cd src && python -m data.setup_backtest_job {name}"],
+                                     flavor=flavor, timeout=JOB_TIMEOUT.get(bot, JOB_TIMEOUT_DEFAULT), env=env, secrets=secrets)
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    (LOCAL_DIR / f"{name}.job").write_text(json.dumps({"job_id": job.id, "flavor": flavor, "cpus": FLAVOR_CPUS.get(flavor),
+                                                       "usd_per_hour": FLAVOR_USD_PER_HOUR.get(flavor),
+                                                       "launched_at": dt.datetime.now(dt.timezone.utc).isoformat()}), encoding="utf-8")
+    (LOCAL_DIR / f"{bot}_multiyear.queued").unlink(missing_ok=True)
+    (LOCAL_DIR / f"{name}_error.json").unlink(missing_ok=True)
+    progress = {"bot": bot, "done": 0, "total": len(json.loads(env["STUDY_PLAN"])["symbols"]), "stage": f"starting on an HF Job ({flavor})",
+                "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    (LOCAL_DIR / f"{name}_progress.json").write_text(json.dumps(progress), encoding="utf-8")
+    shutil_rmtree(_work_dir(bot))
+    _eligibility_cache.pop(bot, None)
+    logger.info("[setup_backtest] %s study launched on HF Job %s (%s)", bot, job.id, flavor)
+    return {"ok": True, "action": "launched_job", "job_id": job.id, "flavor": flavor}
+
+
+def shutil_rmtree(path: Path) -> None:
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def job_info(name: str) -> dict[str, Any] | None:
+    try:
+        return json.loads((LOCAL_DIR / f"{name}.job").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _job_stage(job_id: str) -> str | None:
+    """The job's stage on HF (cached 45 s); None when HF can't say."""
+    cached = _job_stage_cache.get(job_id)
+    if cached and time.time() - cached[0] < 45:
+        return cached[1]
+    stage = None
+    try:
+        from huggingface_hub import HfApi
+        st = HfApi(token=os.getenv("HF_API_KEY", "")).inspect_job(job_id=job_id).status
+        stage = str(getattr(st, "stage", st))
+    except Exception as exc:
+        logger.debug("[setup_backtest] job %s status unavailable: %s", job_id, exc)
+    _job_stage_cache[job_id] = (time.time(), stage)
+    return stage
+
+
+def _remote_running(name: str) -> bool:
+    info = job_info(name) or {}
+    stage = _job_stage(info.get("job_id", ""))
+    if stage is None or stage in ("SCHEDULING", "RUNNING", "PENDING", "STARTING"):
+        return True
+    bot = name.removesuffix("_multiyear")
+    (LOCAL_DIR / f"{name}.job").unlink(missing_ok=True)
+    shutil_rmtree(_work_dir(bot))
+    if stage == "COMPLETED":
+        _report_checked.pop(bot, None)
+        (LOCAL_DIR / f"{name}.json").unlink(missing_ok=True)
+        _restore_published_report(bot)          # the job's published result, now
+        _eligibility_cache.pop(bot, None)
+    else:
+        _write_error(name, f"HF Job {info.get('job_id')} ended {stage}; its finished symbols are saved and it resumes there")
+    return False
+
+
+def receive_progress(bot: str, payload: dict[str, Any]) -> None:
+    """A study job's progress, relayed to the Space: written where a local
+    study writes it, so the dashboards and the watchdog read it the same."""
+    name = f"{bot}_multiyear"
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    if payload.get("progress"):
+        (LOCAL_DIR / f"{name}_progress.json").write_text(json.dumps(payload["progress"]), encoding="utf-8")
+    d = _work_dir(bot)
+    shutil_rmtree(d)
+    d.mkdir(parents=True, exist_ok=True)
+    for sym, w in (payload.get("work") or {}).items():
+        (d / f"{sym.replace('/', '__')}.json").write_text(json.dumps(w), encoding="utf-8")
+
+
+def _relay_loop(bot: str, stop: threading.Event) -> None:
+    """In a study job: post the progress to the Space every 30 s."""
+    url, secret, token = os.getenv("STUDY_PROGRESS_URL", ""), os.getenv("STUDY_RELAY_SECRET", ""), os.getenv("HF_API_KEY", "")
+    while url and not stop.is_set():
+        relay_once(bot, url=url, secret=secret, token=token)
+        stop.wait(30)
+
+
+def relay_once(bot: str, *, url: str, secret: str, token: str) -> bool:
+    import requests
+    try:
+        progress = json.loads((LOCAL_DIR / f"{bot}_multiyear_progress.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        progress = None
+    try:
+        r = requests.post(url, json={"progress": progress, "work": _work_files(bot), "at": time.time()},
+                          headers={"Authorization": f"Bearer {token}", "X-Study-Secret": secret}, timeout=20)
+        return r.ok
+    except Exception:
+        return False
+
+
 FAILED_RETRY_HOURS = float(os.getenv("SETUP_MULTIYEAR_RETRY_HOURS", "6") or "6")
 
 
@@ -1663,6 +1842,17 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     the archive is complete, if it has no published study yet (or a weekly
     refresh is queued) and no other study is running (one study at a time
     gets every core). A study that failed waits FAILED_RETRY_HOURS."""
+    if STUDY_JOBS:
+        # Each study has its own machine: every due one launches at once.
+        if _running(f"{bot}_multiyear"):
+            return {"ok": True, "action": "running"}
+        need = _needs_study(bot)
+        if need != "due":
+            return {"ok": True, "action": need}
+        try:
+            return launch_remote(bot)
+        except Exception as exc:  # no job: the Space runs it, one at a time
+            logger.warning("[setup_backtest] HF Job launch failed for %s, studying on the Space: %s", bot, exc)
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
     if _running("approach_study") or _running("kalshi15m_signal"):
@@ -1739,6 +1929,9 @@ def processing_overview(*, now: float | None = None) -> dict[str, Any]:
         latest = st.get("latest") or {}
         row: dict[str, Any] = {"bot": bot, "combinations": len(grid_labels(bot)), "version": STUDY_VERSION.get(bot, 1),
                                "last_published_at": latest.get("computed_at"), "last_seconds": latest.get("seconds")}
+        info = job_info(f"{bot}_multiyear")
+        row["runner"] = ({"kind": "hf_job", **{k: info.get(k) for k in ("job_id", "flavor", "cpus", "usd_per_hour", "launched_at")}}
+                         if info else {"kind": "space", "cpus": MULTIYEAR_WORKERS})
         try:
             row["watchdog_restarts"] = len(json.loads((LOCAL_DIR / f"{bot}_multiyear_watchdog.json").read_text(encoding="utf-8"))
                                            .get("restarts", []))
@@ -1984,6 +2177,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     sys.path.insert(0, str(SRC_DIR))
     bot_arg = sys.argv[1]
+    relay_stop = threading.Event()
+    if bot_arg.endswith("_multiyear") and os.getenv("STUDY_PROGRESS_URL"):
+        threading.Thread(target=_relay_loop, args=(bot_arg.removesuffix("_multiyear"), relay_stop), daemon=True).start()
     try:
         (LOCAL_DIR / f"{bot_arg}_error.json").unlink(missing_ok=True)
         out = run_multiyear(bot_arg.removesuffix("_multiyear")) if bot_arg.endswith("_multiyear") else run(bot_arg)
@@ -1993,6 +2189,10 @@ if __name__ == "__main__":
         _write_error(bot_arg, traceback.format_exc())
         raise
     finally:
+        relay_stop.set()
+        if bot_arg.endswith("_multiyear") and os.getenv("STUDY_PROGRESS_URL"):
+            relay_once(bot_arg.removesuffix("_multiyear"), url=os.getenv("STUDY_PROGRESS_URL", ""),
+                       secret=os.getenv("STUDY_RELAY_SECRET", ""), token=os.getenv("HF_API_KEY", ""))
         (LOCAL_DIR / f"{bot_arg}.pid").unlink(missing_ok=True)
 
 

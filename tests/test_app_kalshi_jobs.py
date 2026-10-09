@@ -2247,3 +2247,16 @@ def test_the_strategy_board_route_lists_every_bot_with_its_decision(monkeypatch)
         d = client.get("/api/strategy-board").get_json()
     assert d["ok"] and [b["bot"] for b in d["bots"]] == ["perps", "kalshi15m"]
     assert d["bots"][1]["decision"]["have"] == 8 and "charts" in d
+
+
+def test_a_study_jobs_progress_needs_the_study_secret(monkeypatch, tmp_path):
+    from data import setup_backtest_job
+    monkeypatch.setattr(setup_backtest_job, "LOCAL_DIR", tmp_path)
+    monkeypatch.setenv("CRON_SECRET", "s3")
+    body = {"progress": {"bot": "perps", "done": 4, "total": 16, "stage": "replaying"}, "work": {}}
+    with app_kalshi.app.test_client() as client:
+        assert client.post("/api/study-progress/perps", json=body, headers={"X-Study-Secret": "nope"}).status_code == 401
+        assert client.post("/api/study-progress/nobot", json=body, headers={"X-Study-Secret": "s3"}).status_code == 404
+        assert client.post("/api/study-progress/perps", json=body, headers={"X-Study-Secret": "s3"}).status_code == 200
+    import json as _json
+    assert _json.loads((tmp_path / "perps_multiyear_progress.json").read_text())["done"] == 4

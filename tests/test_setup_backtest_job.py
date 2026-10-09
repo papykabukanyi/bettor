@@ -562,3 +562,124 @@ def test_studies_learn_on_clean_candles(monkeypatch):
 def test_the_setup_studies_wait_while_another_study_holds_the_cores(monkeypatch):
     monkeypatch.setattr(job, "_running", lambda name: name == "approach_study")
     assert job.maybe_start_multiyear("perps")["action"] == "after_the_running_study"
+
+
+# ---------------------------------------------------------------------------
+# Studies on HF Jobs
+# ---------------------------------------------------------------------------
+def test_a_job_studies_from_the_spaces_plan_without_live_reads(monkeypatch):
+    plan = {"symbols": ["BTC", "ETH"], "costs": {"BTC": {"spread_bps": 0.4}, "ETH": {"spread_bps": 0.4}}}
+    monkeypatch.setattr(job, "_kalshi_study_costs", lambda bot, syms: pytest.fail("a job never reads live costs"))
+    assert job._plan_costs("perps", ["BTC"], plan) == {"BTC": {"spread_bps": 0.4}}  # noqa: SLF001
+    monkeypatch.setattr(job, "_kalshi_study_costs", lambda bot, syms: {s: {"spread_bps": 9.0} for s in syms})
+    assert job._plan_costs("perps", ["SOL"], plan) == {"SOL": {"spread_bps": 9.0}}  # noqa: SLF001 -- not in the plan: read
+
+
+def test_a_study_job_runs_the_spaces_image_with_no_trading_keys(monkeypatch, tmp_path):
+    import huggingface_hub
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    for k, v in (("SPACE_ID", "papylove/bots"), ("SPACE_HOST", "papylove-bots.hf.space"), ("HF_API_KEY", "hf_x"), ("CRON_SECRET", "s3")):
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("KALSHI_PRIVATE_KEY", "never-shipped")
+    monkeypatch.setattr(job, "study_plan", lambda bot: {"symbols": ["BTC", "ETH"], "costs": {"BTC": {}, "ETH": {}}})
+    monkeypatch.setattr(job, "_space_variables", lambda: {"KALSHI_15M_SETUP_SIDES": "long"})
+    calls = {}
+
+    class Api:
+        def __init__(self, token=None):
+            calls["token"] = token
+
+        def run_job(self, **kw):
+            calls.update(kw)
+            return type("J", (), {"id": "job123"})()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    out = job.launch_remote("perps")
+    assert out["ok"] and out["job_id"] == "job123" and out["flavor"] == "cpu-xl"
+    assert calls["image"] == "hf.co/spaces/papylove/bots" and "python -m data.setup_backtest_job perps_multiyear" in calls["command"][-1]
+    assert calls["env"]["SETUP_MULTIYEAR_WORKERS"] == "16" and calls["env"]["KALSHI_15M_SETUP_SIDES"] == "long"
+    assert calls["env"]["STUDY_PROGRESS_URL"] == "https://papylove-bots.hf.space/api/study-progress/perps"
+    assert set(calls["secrets"]) == {"HF_API_KEY", "STUDY_RELAY_SECRET"}  # no Kalshi or Alpaca keys leave the Space
+    assert "KALSHI_PRIVATE_KEY" not in calls["env"] and calls["timeout"] == "3h"
+    assert job.job_info("perps_multiyear")["job_id"] == "job123"
+    assert json.loads((tmp_path / "perps_multiyear_progress.json").read_text())["stage"].startswith("starting on an HF Job")
+
+
+def test_a_job_study_runs_until_hf_says_it_ended(monkeypatch, tmp_path):
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    (tmp_path / "perps_multiyear.job").write_text(json.dumps({"job_id": "j1", "flavor": "cpu-xl"}))
+    stage = {"v": "RUNNING"}
+    monkeypatch.setattr(job, "_job_stage", lambda job_id: stage["v"])
+    restored = []
+    monkeypatch.setattr(job, "_restore_published_report", lambda bot: restored.append(bot))
+    assert job._running("perps_multiyear") is True  # noqa: SLF001
+    job._eligibility_cache["perps"] = (0.0, {"enforce": False})  # noqa: SLF001
+    stage["v"] = "COMPLETED"
+    assert job._running("perps_multiyear") is False and restored == ["perps"]  # noqa: SLF001
+    assert not (tmp_path / "perps_multiyear.job").exists() and "perps" not in job._eligibility_cache  # noqa: SLF001
+    (tmp_path / "crypto_multiyear.job").write_text(json.dumps({"job_id": "j2"}))
+    stage["v"] = "ERROR"
+    assert job._running("crypto_multiyear") is False  # noqa: SLF001
+    assert "ended ERROR" in json.loads((tmp_path / "crypto_multiyear_error.json").read_text())["error"]
+
+
+def test_progress_relayed_from_a_job_feeds_the_dashboards(monkeypatch, tmp_path):
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    progress = {"bot": "perps", "done": 3, "total": 16, "stage": "replaying",
+                "started_at": "2026-10-09T01:00:00+00:00"}
+    job.receive_progress("perps", {"progress": progress, "work": {"ETH": {"symbol": "ETH", "done": 10, "total": 56, "trades": 40,
+                                                                          "updated": 1.0}}})
+    sp = job.study_progress("perps", json.loads((tmp_path / "perps_multiyear_progress.json").read_text()))
+    assert [s for s, _ in sp["in_flight"]] == ["ETH"] and sp["trades_so_far"] >= 40
+
+
+def test_a_job_relays_its_progress_with_the_study_secret(monkeypatch, tmp_path):
+    import requests
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    (tmp_path / "perps_multiyear_progress.json").write_text(json.dumps({"done": 2, "total": 16}))
+    sent = {}
+    monkeypatch.setattr(requests, "post", lambda url, json=None, headers=None, timeout=None: sent.update(url=url, json=json, headers=headers)
+                        or type("R", (), {"ok": True})())
+    assert job.relay_once("perps", url="https://x/api/study-progress/perps", secret="s3", token="hf_x")
+    assert sent["json"]["progress"] == {"done": 2, "total": 16} and sent["headers"]["X-Study-Secret"] == "s3"
+    assert sent["headers"]["Authorization"] == "Bearer hf_x"
+
+
+def test_on_jobs_every_due_study_launches_at_once(monkeypatch):
+    monkeypatch.setattr(job, "STUDY_JOBS", True)
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    monkeypatch.setattr(job, "_needs_study", lambda bot: "due")
+    launched = []
+    monkeypatch.setattr(job, "launch_remote", lambda bot: launched.append(bot) or {"ok": True, "action": "launched_job"})
+    for bot in ("perps", "options", "stocks"):
+        assert job.maybe_start_multiyear(bot)["action"] == "launched_job"
+    assert launched == ["perps", "options", "stocks"]  # no waiting on one another: each has its own machine
+
+
+def test_a_failed_job_launch_falls_back_to_the_space(monkeypatch):
+    monkeypatch.setattr(job, "STUDY_JOBS", True)
+    monkeypatch.setattr(job, "_running", lambda name: False)
+    monkeypatch.setattr(job, "_needs_study", lambda bot: "due")
+    monkeypatch.setattr(job, "launch_remote", lambda bot: (_ for _ in ()).throw(RuntimeError("no jobs quota")))
+    monkeypatch.setattr(job, "launch", lambda name: {"ok": True, "action": "launched", "name": name})
+    assert job.maybe_start_multiyear("perps") == {"ok": True, "action": "launched", "name": "perps_multiyear"}
+
+
+def test_the_watchdog_cancels_a_stalled_job(monkeypatch, tmp_path):
+    import huggingface_hub
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    (tmp_path / "perps_multiyear.job").write_text(json.dumps({"job_id": "j9"}))
+    monkeypatch.setattr(job, "_job_stage", lambda job_id: "RUNNING")
+    monkeypatch.setattr(job, "study_progress", lambda bot, pr, now=None: {"stalled": True, "idle_sec": 3600})
+    cancelled = []
+
+    class Api:
+        def __init__(self, token=None):
+            pass
+
+        def cancel_job(self, job_id):
+            cancelled.append(job_id)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    out = job.watch_studies()
+    assert cancelled == ["j9"] and "perps" in out["acted"] and not (tmp_path / "perps_multiyear.job").exists()
