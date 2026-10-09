@@ -1363,6 +1363,8 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     todo = [s for s in symbols if s not in parts]
     costs: dict[str, dict[str, Any]] = {}
     if todo and bot in ARCHIVE_STUDY_BOTS:
+        if plan:
+            _prefetch_archives(bot, todo)  # a fresh job machine: every file in parallel first
         # Archives to local disk once, before the workers read them.
         from data import alpaca_news_history
         alpaca_news_history.index_for([])  # every month on local disk once, before the workers read it
@@ -1677,6 +1679,46 @@ FLAVOR_USD_PER_HOUR = {"cpu-basic": 0.01, "cpu-upgrade": 0.03, "cpu-xl": 1.00, "
 JOB_TIMEOUT = {"stocks": "4h"}
 JOB_TIMEOUT_DEFAULT = "3h"
 _job_stage_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def _prefetch_archives(bot: str, symbols: list[str]) -> dict[str, int]:
+    """A fresh machine (an HF Job) has none of the archives on disk: fetch
+    every file this study reads, 32 at a time, straight to where the
+    loaders look (one file at a time took hours for the stocks study)."""
+    import importlib
+
+    from huggingface_hub import snapshot_download
+
+    from data import alpaca_crypto_history, alpaca_news_history, alpaca_sip_history, kalshi_15m_setup
+    token = os.getenv("HF_API_KEY", "")
+    if not token:
+        return {}
+    m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+    wanted = set(symbols) | {m.leader_for(s) for s in symbols}
+    sip, crypto = {"SPY"}, set()
+    for sym in wanted:
+        if bot in ("stocks", "options"):
+            sip.add(sym)
+        elif sym in kalshi_15m_setup.METAL_CHART_SYMBOL:
+            sip.add(kalshi_15m_setup.METAL_CHART_SYMBOL[sym])
+        else:
+            crypto.add(sym.split("/")[0].upper())
+    fetched: dict[str, int] = {}
+    for label, repo, local, patterns in (
+            ("sip", alpaca_sip_history.HF_REPO, alpaca_sip_history.LOCAL_DIR, [f"bars_1m/{x}/*.parquet" for x in sorted(sip)]),
+            ("crypto", alpaca_crypto_history.HF_REPO, alpaca_crypto_history.LOCAL_DIR, [f"bars_1m/{x}/*.parquet" for x in sorted(crypto)]),
+            ("news", alpaca_news_history.HF_REPO, alpaca_news_history.LOCAL_DIR, ["news/*.parquet"])):
+        if not patterns:
+            continue
+        started = time.time()
+        try:
+            path = snapshot_download(repo_id=repo, repo_type="dataset", local_dir=str(local), allow_patterns=patterns, token=token,
+                                     max_workers=32)
+            fetched[label] = sum(1 for _ in Path(path).rglob("*.parquet"))
+            logger.info("[setup_backtest] prefetched %s archive: %d files in %.0fs", label, fetched[label], time.time() - started)
+        except Exception as exc:  # the loaders still fetch whatever is missing, one at a time
+            logger.warning("[setup_backtest] %s prefetch failed: %s", label, exc)
+    return fetched
 
 
 def _plan_costs(bot: str, todo: list[str], plan: dict[str, Any]) -> dict[str, Any]:

@@ -688,7 +688,7 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=["crypto"],
                               id="crypto_multiyear_startup", replace_existing=True,
                               next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-                                  minutes=int(os.getenv("SETUP_MULTIYEAR_CRYPTO_STARTUP_DELAY_MIN", "15") or "15")))
+                                  minutes=3 if setup_backtest_job.STUDY_JOBS else int(os.getenv("SETUP_MULTIYEAR_CRYPTO_STARTUP_DELAY_MIN", "15") or "15")))
             if setup_backtest_job.latest("crypto") is None:
                 scheduler.add_job(setup_backtest_job.launch, "date", args=["crypto"], id="crypto_setup_backtest_startup",
                                   run_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=100),

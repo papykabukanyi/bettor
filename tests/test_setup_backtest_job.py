@@ -683,3 +683,19 @@ def test_the_watchdog_cancels_a_stalled_job(monkeypatch, tmp_path):
     monkeypatch.setattr(huggingface_hub, "HfApi", Api)
     out = job.watch_studies()
     assert cancelled == ["j9"] and "perps" in out["acted"] and not (tmp_path / "perps_multiyear.job").exists()
+
+
+def test_a_job_fetches_every_archive_file_in_parallel_where_the_loaders_look(monkeypatch):
+    import huggingface_hub
+
+    from data import alpaca_crypto_history, alpaca_sip_history
+    calls = []
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **kw: calls.append(kw) or str(kw["local_dir"]))
+    monkeypatch.setenv("HF_API_KEY", "hf_x")
+    job._prefetch_archives("perps", ["BTC", "GOLD"])  # noqa: SLF001
+    by_repo = {c["repo_id"]: c for c in calls}
+    sip = by_repo[alpaca_sip_history.HF_REPO]
+    assert set(sip["allow_patterns"]) >= {"bars_1m/GLD/*.parquet", "bars_1m/SPY/*.parquet", "bars_1m/SLV/*.parquet"}
+    assert sip["local_dir"] == str(alpaca_sip_history.LOCAL_DIR) and sip["max_workers"] == 32
+    crypto = by_repo[alpaca_crypto_history.HF_REPO]
+    assert set(crypto["allow_patterns"]) == {"bars_1m/BTC/*.parquet", "bars_1m/ETH/*.parquet"}  # BTC and its leader ETH

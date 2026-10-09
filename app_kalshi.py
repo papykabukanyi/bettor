@@ -1733,7 +1733,7 @@ def _ensure_background_jobs_started() -> None:
                 scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=[bot],
                                   id=f"{bot}_multiyear_startup", replace_existing=True,
                                   next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-                                      minutes=int(os.getenv("SETUP_MULTIYEAR_KALSHI_STARTUP_DELAY_MIN", "30") or "30")))
+                                      minutes=3 if setup_backtest_job.STUDY_JOBS else int(os.getenv("SETUP_MULTIYEAR_KALSHI_STARTUP_DELAY_MIN", "30") or "30")))
             # The 15m bot's new-signal study (weekly, scored on held-out
             # weeks): checked every 30 minutes, runs when due and no
             # multi-year study is using the cores.

@@ -690,7 +690,7 @@ def _ensure_background_jobs_started() -> None:
             scheduler.add_job(setup_backtest_job.maybe_start_multiyear, "interval", minutes=10, args=["options"],
                               id="options_multiyear_startup", replace_existing=True,
                               next_run_time=dt.datetime.now(dt.timezone.utc) + dt.timedelta(
-                                  minutes=int(os.getenv("SETUP_MULTIYEAR_OPTIONS_STARTUP_DELAY_MIN", "30") or "30")))
+                                  minutes=3 if setup_backtest_job.STUDY_JOBS else int(os.getenv("SETUP_MULTIYEAR_OPTIONS_STARTUP_DELAY_MIN", "30") or "30")))
             scheduler.add_job(setup_backtest_job.launch, "cron", hour=5, minute=10, args=["options"],
                               id="options_setup_backtest", replace_existing=True)
             if setup_backtest_job.latest("options") is None:
