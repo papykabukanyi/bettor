@@ -79,14 +79,18 @@ def test_kalshi_study_symbols_are_what_alpaca_charts(monkeypatch):
     k15 = job._study_symbols("kalshi15m")  # noqa: SLF001
     assert {"BTC", "ADA", "GOLD", "WTI", "NATGAS"} <= set(k15) and "NEAR" not in k15
     assert (1.5, 3.0) in job.study_grid("perps") and (0.5, 2.0) in job.study_grid("kalshi15m")
-    # Thousands of combinations per bot, each around its own method:
-    # stop x target x (time limit x break-even) / (entry window x exit style).
-    assert len(job.grid_labels("perps")) == len(job.grid_labels("crypto")) == 56 * 30 == 1680
-    assert len(job.grid_labels("stocks")) == len(job.grid_labels("options")) == 56 * 20 == 1120
-    assert len(job.grid_labels("kalshi15m")) == 72 * 9 == 648
+    # Many thousand combinations per bot, each around its own method: plan x
+    # exit management (time limit x break-even x trailing) / (entry window x
+    # exit style) x the method's indicator profiles (strict to loose).
+    full, coarse = 11 * 10, 3 * 3 + 1
+    assert len(job.grid_labels("perps")) == len(job.grid_labels("crypto")) == (full + 8 * coarse) * 45 == 8550
+    assert len(job.grid_labels("stocks")) == len(job.grid_labels("options")) == (full + 8 * coarse) * 30 == 5700
+    assert len(job.grid_labels("kalshi15m")) == (11 * 12 + 8 * coarse) * 15 == 3180
     for bot in ("perps", "crypto", "stocks", "options", "kalshi15m"):
         assert job.default_param(bot) in job.grid_labels(bot), bot
-    assert "1.5:3.0:8.0:1.0" in job.grid_labels("perps")
+    ind = [job.study_runs("perps")[0]["ind"][k] for k in job.IND_KEYS]
+    assert job._param_label(1.5, 3.0, 8.0, 1.0, 2.0, *ind) in job.grid_labels("perps")  # noqa: SLF001 -- with a 2R trailing stop
+    assert [r["name"] for r in job.study_runs("perps")][-1] == "loose" and job.study_runs("perps")[-1]["first_check"] == 2
     assert job.MULTIYEAR["stocks"]["lookback"] == 0 and "stocks" in job.ARCHIVE_STUDY_BOTS
 
 
@@ -104,8 +108,11 @@ def test_a_kalshi_study_symbol_is_replayed_per_setting_and_annotated(monkeypatch
         return pd.DataFrame([{"entry_ts": t0, "side": "long", "net_return": 0.01, "leader_corr": 0.9, "leader_dir": "up"}])
 
     monkeypatch.setattr(perps_setup, "replay", fake_replay)
-    out = job._multiyear_kalshi_symbol(("perps", "BTC", [(1.0, 2.0), (1.5, 3.0)], {"fee_rate_roundtrip": 0.001, "spread_bps": 5.0}))  # noqa: SLF001
-    assert sorted(out.param) == ["1.0:2.0", "1.5:3.0"]
+    ind = {k: float(getattr(perps_setup, k)) for k in job.IND_KEYS}
+    monkeypatch.setattr(job, "study_runs", lambda bot: [{"name": "default", "ind": ind, "plans": [(1.0, 2.0), (1.5, 3.0)], "first_check": None}])
+    out = job._multiyear_kalshi_symbol(("perps", "BTC", {"fee_rate_roundtrip": 0.001, "spread_bps": 5.0}))  # noqa: SLF001
+    vals = [ind[k] for k in job.IND_KEYS]
+    assert sorted(out.param) == sorted([job._param_label(1.0, 2.0, *vals), job._param_label(1.5, 3.0, *vals)])  # noqa: SLF001
     assert set(out.news) == {"with"} and set(out.leader) == {"with"} and set(out.news_count) == {1.0}
     assert (perps_setup.STOP_BUFFER_ATR15, perps_setup.MIN_RR) == (1.5, 3.0)  # defaults restored
     # One column per condition: the replay's own `side` once (a second copy
@@ -301,13 +308,18 @@ def test_a_perps_study_trade_carries_its_full_setting(monkeypatch):
     def fake_replay(df, **kw):
         seen.append(kw["exits"])
         return pd.DataFrame([{"entry_ts": t0, "side": "long", "net_return": 0.01, "leader_corr": 0.9, "leader_dir": "up",
-                              "hold_h": h / 60.0, "be_r": b} for h, b in kw["exits"]])
+                              "hold_h": h / 60.0, "be_r": b, "trail_r": tr} for h, b, tr in kw["exits"]])
 
     monkeypatch.setattr(perps_setup, "replay", fake_replay)
-    out = job._multiyear_kalshi_symbol(("perps", "BTC", [(1.5, 3.0)], {"fee_rate_roundtrip": 0.001, "spread_bps": 5.0}))  # noqa: SLF001
-    assert seen == [[(h * 60.0, b) for h, b in job.PERPS_EXITS]]
-    assert sorted(out.param) == sorted(job._param_label(1.5, 3.0, h, b) for h, b in job.PERPS_EXITS)  # noqa: SLF001
-    assert job._param_values("2.5:3.0:8.0:1.0") == {"STOP_BUFFER_ATR15": 2.5, "MIN_RR": 3.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 1.0}  # noqa: SLF001
+    ind = {k: float(getattr(perps_setup, k)) for k in job.IND_KEYS}
+    monkeypatch.setattr(job, "study_runs", lambda bot: [{"name": "default", "ind": ind, "plans": [(1.5, 3.0)], "first_check": None}])
+    out = job._multiyear_kalshi_symbol(("perps", "BTC", {"fee_rate_roundtrip": 0.001, "spread_bps": 5.0}))  # noqa: SLF001
+    assert seen == [[(h * 60.0, b, tr) for h, b, tr in job.PERPS_EXITS]]
+    vals = [ind[k] for k in job.IND_KEYS]
+    assert sorted(out.param) == sorted(job._param_label(1.5, 3.0, h, b, tr, *vals) for h, b, tr in job.PERPS_EXITS)  # noqa: SLF001
+    assert job._param_values("2.5:3.0:8.0:1.0:2.0:1.2:0.25:12.0:0.5") == {  # noqa: SLF001
+        "STOP_BUFFER_ATR15": 2.5, "MIN_RR": 3.0, "MAX_HOLD_HOURS": 8.0, "BREAKEVEN_R": 1.0, "TRAIL_R": 2.0,
+        "VOLUME_MULT": 1.2, "RETEST_TOL_ATR": 0.25, "BREAKOUT_LOOKBACK_5M": 12.0, "CORR_MIN": 0.5}
 
 
 def test_a_stock_study_symbol_is_replayed_on_sip_with_its_session_rules(monkeypatch):
@@ -322,10 +334,69 @@ def test_a_stock_study_symbol_is_replayed_on_sip_with_its_session_rules(monkeypa
     t0 = int(candles.ts.iloc[-1])
 
     def fake_replay(df, **kw):
-        assert kw["entry_allowed"] is alpaca_setup.entry_allowed and kw["force_exit"] is alpaca_setup.must_be_flat
+        session_open = int(pd.Timestamp("2026-03-03 10:31", tz="America/New_York").timestamp())
+        weekend = int(pd.Timestamp("2026-03-07 10:31", tz="America/New_York").timestamp())
+        assert kw["entry_allowed"](session_open) and not kw["entry_allowed"](weekend)  # the session rules still apply
+        assert kw["force_exit"] is alpaca_setup.must_be_flat
         return pd.DataFrame([{"entry_ts": t0, "side": "long", "net_return": 0.01, "leader_corr": 0.9, "leader_dir": "up"}])
 
     monkeypatch.setattr(alpaca_setup, "replay", fake_replay)
-    out = job._multiyear_kalshi_symbol(("stocks", "AAPL", [(0.5, 2.0), (1.0, 3.0)], {"fee_rate_roundtrip": 0.0, "spread_bps": 2.0}))  # noqa: SLF001
-    assert sorted(out.param) == ["0.5:2.0", "1.0:3.0"] and {"hour_block", "weekday", "us_market"} <= set(out.columns)
+    ind = {k: float(getattr(alpaca_setup, k)) for k in job.IND_KEYS}
+    monkeypatch.setattr(job, "study_runs", lambda bot: [{"name": "default", "ind": ind, "plans": [(0.5, 2.0), (1.0, 3.0)], "first_check": None}])
+    out = job._multiyear_kalshi_symbol(("stocks", "AAPL", {"fee_rate_roundtrip": 0.0, "spread_bps": 2.0}))  # noqa: SLF001
+    vals = [ind[k] for k in job.IND_KEYS]
+    assert sorted(out.param) == sorted([job._param_label(0.5, 2.0, *vals), job._param_label(1.0, 3.0, *vals)])  # noqa: SLF001
+    assert {"hour_block", "weekday", "us_market"} <= set(out.columns)
     assert ("AAPL", "stocks") in seen and (alpaca_setup.leader_for("AAPL"), "stocks") in seen
+
+
+@pytest.mark.parametrize("module", ["perps_setup", "alpaca_crypto_setup", "alpaca_setup", "alpaca_options_setup"])
+def test_a_trailing_stop_locks_in_the_run_up(monkeypatch, module):
+    """Exit management (user 2026-10-10): with a 1R trailing stop the trade
+    rides the run to 103 and exits on the pullback at 102 (best - 1R);
+    without it the same entry rides back down to its time exit."""
+    import importlib
+
+    import numpy as np
+    m = importlib.import_module(f"data.{module}")
+    t0 = 1_790_000_000 // 300 * 300
+    n = 240
+    close = np.full(n, 100.0)
+    close[40:60] = np.linspace(100.2, 103.0, 20)   # +3R run (stop 99, risk 1)
+    close[60:] = 100.4                              # gives most of it back
+    df = pd.DataFrame({"ts": t0 + 60 * (np.arange(n) + 1), "open": np.r_[100.0, close[:-1]], "high": close + 0.01,
+                       "low": close - 0.01, "close": close, "volume": 1.0})
+    entry_at = int(t0 + 30 * 60)
+
+    def fake_evaluate(ctx, as_of, **kw):
+        if int(as_of) != entry_at:
+            return {"valid": False, "reason": "trend"}
+        return {"valid": True, "side": "long", "setup_id": "s1", "setup": "breakout", "checks": {},
+                "plan": {"stop": 99.0, "target": 110.0, "rr_net": 9.0}}
+
+    monkeypatch.setattr(m, "evaluate", fake_evaluate)
+    t = m.replay(df, sides=("long",), fee_rate_roundtrip=0.0, spread_bps=0.0, exits=[(120.0, 0.0, 0.0), (120.0, 0.0, 1.0)])
+    by = {r.trail_r: r for r in t.itertuples()}
+    assert by[1.0].exit == "trailing_stop" and by[1.0].gross_return == pytest.approx((103.0 + 0.01 - 1.0 - 100.0) / 100.0, abs=2e-3)
+    assert by[0.0].exit == "time_exit" and by[0.0].gross_return < by[1.0].gross_return
+
+
+@pytest.mark.parametrize("module", ["perps_setup", "alpaca_crypto_setup", "alpaca_setup", "alpaca_options_setup"])
+def test_the_live_trailing_stop_follows_the_best_price(module):
+    """The live bots move the stop the way the study does: once the best price
+    is setup_trail_r x the risk in profit, the stop follows it at that
+    distance, in steps of at least TRAIL_STEP_R of the risk."""
+    import importlib
+    m = importlib.import_module(f"data.{module}")
+    pos = {"side": "long", "entry_price": 100.0, "setup_stop_price": 98.0, "setup_target_price": 120.0, "setup_trail_r": 1.0}
+    assert m.plan_update(pos, 101.0) is False                       # +0.5R: not yet
+    assert m.plan_update(pos, 103.0) is True and pos["setup_stop_price"] == pytest.approx(101.0)
+    assert m.plan_update(pos, 103.1) is False                       # a 0.1 move < 0.2 (0.1R): no churn
+    assert m.plan_update(pos, 104.0) is True and pos["setup_stop_price"] == pytest.approx(102.0)
+    assert m.plan_update(pos, 102.5) is False and pos["setup_stop_price"] == pytest.approx(102.0)  # never moves back
+    hit, why = m.plan_exit(pos, 101.9)
+    assert hit and why.startswith("trailing_stop")
+    short = {"side": "short", "entry_price": 100.0, "setup_stop_price": 102.0, "setup_target_price": 80.0, "setup_trail_r": 1.0,
+             "setup_breakeven_r": 0.5}
+    assert m.plan_update(short, 99.0) is True and short["setup_stop_price"] == pytest.approx(100.0)   # break-even first
+    assert m.plan_update(short, 97.0) is True and short["setup_stop_price"] == pytest.approx(99.0)    # then the trail

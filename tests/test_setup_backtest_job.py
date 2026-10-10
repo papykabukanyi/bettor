@@ -237,15 +237,32 @@ def _fake_part(sym: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _archive_years(monkeypatch, years=range(2023, 2027)):
+    """Every symbol's archive spans `years` (one candle each: enough to know them)."""
+    ts = [int(pd.Timestamp(f"{y}-03-01", tz="UTC").timestamp()) + 60 for y in years]
+    candles = pd.DataFrame({"ts": ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0})
+    monkeypatch.setattr(job, "_study_candles", lambda sym, bot=None: (candles, "utc_day"))
+    from data import alpaca_news_history, alpaca_sip_history
+    monkeypatch.setattr(alpaca_news_history, "index_for", lambda syms: {})
+    monkeypatch.setattr(alpaca_sip_history, "load", lambda sym, **kw: pd.DataFrame())
+
+
+def _save_by_year(sym: str, part: pd.DataFrame) -> None:
+    years = pd.to_datetime(part["entry_ts"], unit="s", utc=True).dt.year
+    for y, g in part.groupby(years):
+        job._save_part("perps", f"{sym}@{y}", g.reset_index(drop=True))  # noqa: SLF001
+
+
 def test_a_study_that_died_after_its_replays_resumes_at_the_analysis(monkeypatch):
-    """Every replayed symbol is saved as it finishes: a rerun replays only
-    what is missing, so a failure in the analysis never costs the hours of
-    replay again."""
+    """Every replayed symbol-year is saved as it finishes: a rerun replays
+    only what is missing, so a failure in the analysis never costs the hours
+    of replay again."""
     monkeypatch.setattr(job, "_study_symbols", lambda bot: ["BTC", "ETH"])
     monkeypatch.setattr(job, "study_grid", lambda bot: [(1.0, 2.0)])
+    _archive_years(monkeypatch)
     job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": job.grid_labels("perps")})  # noqa: SLF001
     for sym in ("BTC", "ETH"):
-        job._save_part("perps", sym, _fake_part(sym))  # noqa: SLF001
+        _save_by_year(sym, _fake_part(sym))
 
     def no_pool(*a, **k):
         raise AssertionError("nothing left to replay")
@@ -254,7 +271,7 @@ def test_a_study_that_died_after_its_replays_resumes_at_the_analysis(monkeypatch
     result = job.run_multiyear("perps", publish=False)
     progress = json.loads((job.LOCAL_DIR / "perps_multiyear_progress.json").read_text())
     assert result["ok"] and result["walk_forward"]["test_years"] == 3 and "patterns" in result
-    assert progress["resumed"] == ["BTC", "ETH"] and progress["stage"] == "done"
+    assert progress["resumed"] == 8 and progress["tasks"] == 8 and progress["stage"] == "done"  # 2 symbols x 4 years
     assert (job.LOCAL_DIR / "perps_multiyear_trades.parquet").exists() and not job._parts_dir("perps").exists()  # noqa: SLF001
 
 
@@ -297,10 +314,13 @@ def test_replays_saved_with_a_doubled_column_still_analyse(monkeypatch):
     one, so the restarted study finishes instead of failing again."""
     monkeypatch.setattr(job, "_study_symbols", lambda bot: ["BTC"])
     monkeypatch.setattr(job, "study_grid", lambda bot: [(1.0, 2.0)])
+    _archive_years(monkeypatch)
     job._load_parts("perps", {"version": job.STUDY_VERSION.get("perps", 1), "grid": job.grid_labels("perps")})  # noqa: SLF001
     part = _fake_part("BTC")
-    doubled = pd.concat([part, part[["side"]]], axis=1)
-    doubled.to_pickle(job._parts_dir("perps") / "BTC.pkl")  # noqa: SLF001 -- as the failed run left it
+    years = pd.to_datetime(part["entry_ts"], unit="s", utc=True).dt.year
+    for y, g in part.groupby(years):
+        g = g.reset_index(drop=True)
+        pd.concat([g, g[["side"]]], axis=1).to_pickle(job._parts_dir("perps") / f"BTC@{y}.pkl")  # noqa: SLF001 -- as the failed run left it
     result = job.run_multiyear("perps", publish=False)
     assert result["ok"] and "patterns" in result and "side" in result["patterns"]["by_condition"]
 
@@ -482,7 +502,7 @@ def test_the_processing_overview_shows_every_study_in_queue_order(monkeypatch):
     monkeypatch.setattr(job, "_cached_need", lambda bot: needs[bot])
     rows = {r["bot"]: r for r in job.processing_overview()["studies"]}
     assert list(rows) == ["perps", "kalshi15m", "crypto", "stocks", "options"]
-    assert rows["perps"]["state"] == "running" and rows["perps"]["progress"]["done"] == 2 and rows["perps"]["combinations"] == 1680
+    assert rows["perps"]["state"] == "running" and rows["perps"]["progress"]["done"] == 2 and rows["perps"]["combinations"] == len(job.grid_labels("perps")) == 8550
     assert rows["kalshi15m"]["state"] == "queued" and rows["kalshi15m"]["queue_position"] == 2
     assert rows["crypto"]["waiting_for"] == ["crypto history back to 2021"] and rows["options"]["state"] == "done"
 
@@ -591,18 +611,22 @@ def test_a_study_job_runs_the_spaces_image_with_no_trading_keys(monkeypatch, tmp
 
         def run_job(self, **kw):
             calls.update(kw)
-            return type("J", (), {"id": "job123"})()
+            calls.setdefault("shards", []).append(kw["env"]["STUDY_SHARD"])
+            calls.setdefault("urls", []).append(kw["env"]["STUDY_PROGRESS_URL"])
+            return type("J", (), {"id": f"job12{len(calls['shards']) + 2}"})()
 
     monkeypatch.setattr(huggingface_hub, "HfApi", Api)
     out = job.launch_remote("perps")
-    assert out["ok"] and out["job_id"] == "job123" and out["flavor"] == "cpu-xl"
+    assert out["ok"] and out["job_id"] == "job123" and out["flavor"] == "cpu-performance"
+    assert calls["shards"] == ["1/2", "2/2"] and [j["job_id"] for j in out["jobs"]] == ["job123", "job124"]  # two shares
     assert calls["image"] == "hf.co/spaces/papylove/bots" and "python -m data.setup_backtest_job perps_multiyear" in calls["command"][-1]
-    assert calls["env"]["SETUP_MULTIYEAR_WORKERS"] == "16" and calls["env"]["KALSHI_15M_SETUP_SIDES"] == "long"
-    assert calls["env"]["STUDY_PROGRESS_URL"] == "https://papylove-bots.hf.space/api/study-progress/perps"
+    assert calls["env"]["SETUP_MULTIYEAR_WORKERS"] == "32" and calls["env"]["KALSHI_15M_SETUP_SIDES"] == "long"
+    assert calls["urls"] == [f"https://papylove-bots.hf.space/api/study-progress/perps?shard={k}" for k in (1, 2)]
     assert set(calls["secrets"]) == {"HF_API_KEY", "STUDY_RELAY_SECRET"}  # no Kalshi or Alpaca keys leave the Space
-    assert "KALSHI_PRIVATE_KEY" not in calls["env"] and calls["timeout"] == "3h"
+    assert "KALSHI_PRIVATE_KEY" not in calls["env"] and calls["timeout"] == "6h"
     assert job.job_info("perps_multiyear")["job_id"] == "job123"
-    assert json.loads((tmp_path / "perps_multiyear_progress.json").read_text())["stage"].startswith("starting on an HF Job")
+    assert json.loads((tmp_path / "perps_multiyear_progress.json").read_text())["stage"].startswith("starting on 2 HF Jobs")
+    assert [j["shard"] for j in job.job_info("perps_multiyear")["jobs"]] == [1, 2]
 
 
 def test_a_job_study_runs_until_hf_says_it_ended(monkeypatch, tmp_path):
@@ -660,9 +684,30 @@ def test_a_failed_job_launch_falls_back_to_the_space(monkeypatch):
     monkeypatch.setattr(job, "STUDY_JOBS", True)
     monkeypatch.setattr(job, "_running", lambda name: False)
     monkeypatch.setattr(job, "_needs_study", lambda bot: "due")
+    monkeypatch.setattr(job, "STUDY_PRIORITY", [])
     monkeypatch.setattr(job, "launch_remote", lambda bot: (_ for _ in ()).throw(RuntimeError("no jobs quota")))
     monkeypatch.setattr(job, "launch", lambda name: {"ok": True, "action": "launched", "name": name})
-    assert job.maybe_start_multiyear("perps") == {"ok": True, "action": "launched", "name": "perps_multiyear"}
+    assert job.maybe_start_multiyear("options") == {"ok": True, "action": "launched", "name": "options_multiyear"}
+    # A study split across jobs is too big for the Space's cores: it waits for jobs instead.
+    out = job.maybe_start_multiyear("stocks")
+    assert out["action"] == "jobs_unavailable" and "could not launch" in json.loads(
+        (job.LOCAL_DIR / "stocks_multiyear_error.json").read_text())["error"]
+
+
+def test_a_split_studys_progress_is_one_bar(monkeypatch, tmp_path):
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    started = "2026-10-10T01:00:00+00:00"
+    job.receive_progress("stocks", {"progress": {"done": 100, "total": 528, "stage": "replaying", "started_at": "2026-10-10T01:02:00+00:00",
+                                                 "trades_so_far": 900, "shard": "1/3"},
+                                    "work": {"AAPL@2020": {"symbol": "AAPL@2020", "done": 3, "total": 182, "trades": 9, "updated": 1.0}}},
+                         shard=1)
+    job.receive_progress("stocks", {"progress": {"done": 90, "total": 528, "stage": "replaying", "started_at": started,
+                                                 "trades_so_far": 700, "shard": "2/3"},
+                                    "work": {"MSFT@2021": {"symbol": "MSFT@2021", "done": 50, "total": 182, "trades": 4, "updated": 1.0}}},
+                         shard=2)
+    merged = json.loads((tmp_path / "stocks_multiyear_progress.json").read_text())
+    assert merged["done"] == 190 and merged["total"] == 1056 and merged["trades_so_far"] == 1600 and merged["started_at"] == started
+    assert {w for w in job._work_files("stocks")} == {"AAPL@2020", "MSFT@2021"}  # noqa: SLF001 -- both shares in flight
 
 
 def test_the_watchdog_cancels_a_stalled_job(monkeypatch, tmp_path):
@@ -699,3 +744,78 @@ def test_a_job_fetches_every_archive_file_in_parallel_where_the_loaders_look(mon
     assert sip["local_dir"] == str(alpaca_sip_history.LOCAL_DIR) and sip["max_workers"] == 32
     crypto = by_repo[alpaca_crypto_history.HF_REPO]
     assert set(crypto["allow_patterns"]) == {"bars_1m/BTC/*.parquet", "bars_1m/ETH/*.parquet"}  # BTC and its leader ETH
+
+
+def test_indicator_profiles_reuse_only_failures_before_the_rule_they_change():
+    """A profile that changes the volume rule reuses the default run's bars
+    that failed before volume, and re-evaluates every bar that got further:
+    the same decisions as evaluating everything again, for less work."""
+    class M:
+        CHECK_ORDER = ["data", "trend", "breakout", "volume", "retest", "hold", "vwap", "momentum", "divergence", "news",
+                       "risk_reward", "correlation"]
+        calls: list = []
+
+        @staticmethod
+        def evaluate(ctx, as_of, **kw):
+            M.calls.append(as_of)
+            reason = {1: "trend", 2: "volume", 3: "retest", 4: "risk_reward"}[as_of]
+            return {"valid": False, "reason": reason, "by_side": {"long": {"reason": reason}}}
+
+        @staticmethod
+        def prepare(df1, **kw):
+            return df1
+
+    cache = job._SettingFreeCache(M).__enter__()  # noqa: SLF001
+    for as_of in (1, 2, 3, 4):
+        M.evaluate(None, as_of, sides=("long",))
+    assert M.calls == [1, 2, 3, 4]
+    M.calls.clear()
+    for as_of in (1, 2, 3, 4):           # another plan setting: everything before reward/risk is reused
+        M.evaluate(None, as_of, sides=("long",))
+    assert M.calls == [4]
+    M.calls.clear()
+    cache.set_run(M.CHECK_ORDER.index("volume"))   # a volume profile
+    for as_of in (1, 2, 3, 4):
+        M.evaluate(None, as_of, sides=("long",))
+    assert M.calls == [2, 3, 4]          # only the trend failure is reused
+    M.calls.clear()
+    for as_of in (1, 2, 3, 4):           # the profile's next plan setting reuses its own early failures
+        M.evaluate(None, as_of, sides=("long",))
+    assert M.calls == [4]
+    cache.__exit__()
+
+
+def _ft_trades(edge_back: float, edge_fwd: float) -> pd.DataFrame:
+    rows = []
+    for year in range(2016, 2026):
+        edge = edge_back if year < 2022 else edge_fwd
+        for sym in ("AAPL", "MSFT"):
+            for i in range(20):
+                ts = int(pd.Timestamp(f"{year}-02-01", tz="UTC").timestamp()) + 86400 * i
+                win = i % 2 == 0
+                rows.append({"symbol": sym, "param": "1.0:2.0", "entry_ts": ts, "net_return": (0.01 if win else -0.01) + edge,
+                             "hour_block": "h10", "weekday": "tue"})
+                rows.append({"symbol": sym, "param": "1.5:3.0", "entry_ts": ts, "net_return": (0.01 if win else -0.01) - 0.002,
+                             "hour_block": "h10", "weekday": "tue"})
+    return pd.DataFrame(rows)
+
+
+def test_the_long_forward_test_freezes_the_backtest_choice():
+    """Chosen once on the first 60% of years, then traded unchanged through
+    the rest: an edge that lasts passes, one that faded fails."""
+    keys = ("STOP_BUFFER_ATR15", "MIN_RR")
+    good = job.forward_test(_ft_trades(0.003, 0.003), default_param="1.5:3.0", keys=keys)
+    assert good["backtest_years"] == list(range(2016, 2022)) and good["forward_years"] == list(range(2022, 2026))
+    assert good["label"] == "1.0:2.0" and good["param"] == {"STOP_BUFFER_ATR15": 1.0, "MIN_RR": 2.0} and good["pass"] is True and good["forward"]["trades"] == 160 and good["trades_per_year"] == 40.0
+    assert good["years_up"] == 4 and good["forward"]["avg"] > 0
+    faded = job.forward_test(_ft_trades(0.003, -0.004), default_param="1.5:3.0", keys=keys)
+    assert faded["label"] == "1.0:2.0" and faded["pass"] is False and faded["forward"]["avg"] < 0
+
+
+def test_nothing_is_enforced_unless_the_forward_test_passes():
+    result = {"walk_forward": {"enforce": True, "out_of_sample": {"avg": 0.002}, "eligible_now": ["AAPL"]},
+              "trained": {}, "patterns": {}, "forward_test": {"pass": False, "forward": {"avg": -0.001}}}
+    e = job._eligibility_from(result)  # noqa: SLF001
+    assert e["enforce"] is False and e["forward_test"]["pass"] is False
+    result["forward_test"]["pass"] = True
+    assert job._eligibility_from(result)["enforce"] is True  # noqa: SLF001

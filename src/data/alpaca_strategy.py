@@ -411,7 +411,8 @@ def _plan_defaults() -> dict[str, float]:
     if not _PLAN_DEFAULTS:
         from data import alpaca_setup
         _PLAN_DEFAULTS.update({key: float(getattr(alpaca_setup, key))
-                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")})
+                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R",
+                                           "TRAIL_R", "VOLUME_MULT", "RETEST_TOL_ATR", "BREAKOUT_LOOKBACK_5M", "CORR_MIN")})
     return _PLAN_DEFAULTS
 
 
@@ -1310,7 +1311,7 @@ def scan_and_enter(watchlist: list[str] | None = None, *, dry_run: bool | None =
                     # The exit rule this trade was opened under.
                     "setup_initial_stop_price": setup_plan["stop"],
                     "setup_max_hold_minutes": float(alpaca_setup.MAX_HOLD_HOURS) * 60.0,
-                    "setup_breakeven_r": float(alpaca_setup.BREAKEVEN_R),
+                    "setup_breakeven_r": float(alpaca_setup.BREAKEVEN_R), "setup_trail_r": float(alpaca_setup.TRAIL_R),
                 }
             else:
                 entry_price = row["current_price"]

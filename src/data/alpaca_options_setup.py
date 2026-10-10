@@ -121,6 +121,11 @@ MAX_HOLD_SAFETY_MINUTES = _env_int("ALPACA_OPTIONS_SETUP_MAX_HOLD_SAFETY_MINUTES
 # risk in profit, its stop moves to the entry price; 0 = off).
 MAX_HOLD_HOURS = _env_float("ALPACA_OPTIONS_SETUP_MAX_HOLD_HOURS", MAX_HOLD_SAFETY_MINUTES / 60.0)
 BREAKEVEN_R = _env_float("ALPACA_OPTIONS_SETUP_BREAKEVEN_R", 0.0)
+# Trailing stop (user 2026-10-10: exit management): once the best price since
+# entry is TRAIL_R x the trade's risk in profit, the stop follows it at that
+# distance, moving in steps of at least TRAIL_STEP_R x the risk. 0 = off.
+TRAIL_R = _env_float("ALPACA_OPTIONS_SETUP_TRAIL_R", 0.0)
+TRAIL_STEP_R = 0.1
 STALE_AFTER_SEC = 180
 
 CHECK_ORDER = ["data", "trend", "breakout", "volume", "retest", "hold", "vwap", "momentum", "divergence", "news", "risk_reward", "correlation"]
@@ -429,7 +434,7 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
 
         found = None
         by_height = sorted(resistance, key=lambda z: -z["high"])
-        for k in range(last, max(last - BREAKOUT_LOOKBACK_5M, 1) - 1, -1):
+        for k in range(last, max(last - int(BREAKOUT_LOOKBACK_5M), 1) - 1, -1):
             for z in by_height:
                 if formed_before(z, int(f5.ts[k]) - ctx.step5) and f5.close[k] > z["high"] >= f5.close[k - 1]:
                     found = (k, z)
@@ -475,7 +480,7 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
 
         found = None
         by_depth = sorted(support, key=lambda z: z["low"])
-        for r in range(last, max(last - BREAKOUT_LOOKBACK_5M, 1) - 1, -1):
+        for r in range(last, max(last - int(BREAKOUT_LOOKBACK_5M), 1) - 1, -1):
             for z in by_depth:
                 if not (f5.close[r] > z["high"] >= f5.close[r - 1]):
                     continue  # no reclaim at r: no breakdown before it can qualify
@@ -719,7 +724,8 @@ def plan_exit(position: dict[str, Any], price: float, *, held_minutes: float | N
     it) or target, or at the position's time exit (its chosen hold; at
     MAX_HOLD_SAFETY_MINUTES an operational backstop)."""
     stop, target = float(position["setup_stop_price"]), float(position["setup_target_price"])
-    stop_why = (f"breakeven_stop (entry {stop:.6g})" if position.get("setup_breakeven_done")
+    stop_why = (f"trailing_stop ({stop:.6g})" if position.get("setup_trailing")
+                else f"breakeven_stop (entry {stop:.6g})" if position.get("setup_breakeven_done")
                 else f"stop_loss (setup invalidation {stop:.6g})")
     if position.get("side") == "short":
         if price >= stop:
@@ -739,19 +745,35 @@ def plan_exit(position: dict[str, Any], price: float, *, held_minutes: float | N
 
 
 def plan_update(position: dict[str, Any], price: float) -> bool:
-    """The break-even stop: once price is setup_breakeven_r x the trade's
-    risk in profit, its stop moves to the entry price. True when it moved
-    (the caller re-places the exchange bracket)."""
-    be_r = float(position.get("setup_breakeven_r") or 0.0)
-    if be_r <= 0 or position.get("setup_breakeven_done"):
-        return False
+    """The stop's moves while a position is open: the break-even stop (once
+    price is setup_breakeven_r x the trade's risk in profit, the stop moves
+    to entry) and the trailing stop (once the best price since entry is
+    setup_trail_r x the risk in profit, the stop follows it at that
+    distance, in steps of at least TRAIL_STEP_R x the risk). True when the
+    stop moved (the caller re-places any exchange stop)."""
     entry = float(position["entry_price"])
-    stop = float(position.get("setup_initial_stop_price") or position["setup_stop_price"])
+    stop0 = float(position.get("setup_initial_stop_price") or position["setup_stop_price"])
     sign = -1.0 if position.get("side") == "short" else 1.0
-    if sign * (entry - stop) <= 0 or sign * (price - (entry + sign * be_r * abs(entry - stop))) < 0:
+    risk = sign * (entry - stop0)
+    if risk <= 0:
         return False
-    position.update(setup_initial_stop_price=stop, setup_stop_price=entry, setup_breakeven_done=True)
-    return True
+    moved = False
+    be_r = float(position.get("setup_breakeven_r") or 0.0)
+    if be_r > 0 and not position.get("setup_breakeven_done") and sign * (price - (entry + sign * be_r * risk)) >= 0 \
+            and sign * (entry - float(position["setup_stop_price"])) > 0:
+        position.update(setup_initial_stop_price=stop0, setup_stop_price=entry, setup_breakeven_done=True)
+        moved = True
+    trail_r = float(position.get("setup_trail_r") or 0.0)
+    if trail_r > 0:
+        best = float(position.get("setup_best_price") or entry)
+        best = max(best, price) if sign > 0 else min(best, price)
+        position["setup_best_price"] = best
+        if sign * (best - entry) >= trail_r * risk:
+            trail_px = best - sign * trail_r * risk
+            if sign * (trail_px - float(position["setup_stop_price"])) >= TRAIL_STEP_R * risk:
+                position.update(setup_initial_stop_price=stop0, setup_stop_price=trail_px, setup_trailing=True)
+                moved = True
+    return moved
 
 
 def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: float, spread_bps: float,
@@ -774,7 +796,8 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
     ts1 = d["ts"].to_numpy("int64")
     o, h, lo, c = (d[k].to_numpy(float) for k in ("open", "high", "low", "close"))
     safety = MAX_HOLD_SAFETY_MINUTES if max_hold_minutes is None else max_hold_minutes
-    rules = [(min(float(m), float(safety)), float(b)) for m, b in exits] if exits else [(float(safety), 0.0)]
+    rules = ([(min(float(e[0]), float(safety)), float(e[1]), float(e[2]) if len(e) > 2 else 0.0) for e in exits]
+             if exits else [(float(safety), 0.0, 0.0)])
     timelines = [{"busy_until": 0, "used": set()} for _ in rules]
     trades = []
     free_from = 0  # the earliest time any exit rule's timeline is free again
@@ -800,13 +823,13 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
             if r["setup_id"] in tl["used"]:
                 continue
             tl["used"].add(r["setup_id"])
-            hold_cap, be_r = rules[k]
+            hold_cap, be_r, trail_r = rules[k]
             be_px = entry + sign * be_r * abs(entry - stop) if be_r > 0 else None
-            stop_now, moved = stop, False
+            stop_now, moved, trailed, best, risk = stop, False, False, entry, abs(entry - stop)
             exit_px, why, j = None, None, i
             while j < len(ts1) and ts1[j] - ts1[i] < hold_cap * 60:
                 if (lo[j] <= stop_now) if sign > 0 else (h[j] >= stop_now):
-                    exit_px, why = stop_now, "breakeven" if moved else "stop"
+                    exit_px, why = stop_now, "trailing_stop" if trailed else ("breakeven" if moved else "stop")
                     break
                 if (h[j] >= target) if sign > 0 else (lo[j] <= target):
                     exit_px, why = target, "target"
@@ -818,6 +841,12 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
                 # candle that reached the trigger: its order is unknown).
                 if be_px is not None and not moved and ((h[j] >= be_px) if sign > 0 else (lo[j] <= be_px)):
                     stop_now, moved = entry, True
+                if trail_r > 0:
+                    best = max(best, h[j]) if sign > 0 else min(best, lo[j])
+                    if sign * (best - entry) >= trail_r * risk:
+                        trail_px = best - sign * trail_r * risk
+                        if sign * (trail_px - stop_now) >= TRAIL_STEP_R * risk:
+                            stop_now, trailed = trail_px, True
                 j += 1
             if exit_px is None:
                 j = min(j, len(ts1) - 1)
@@ -829,7 +858,7 @@ def replay(df1: pd.DataFrame, *, sides: tuple[str, ...], fee_rate_roundtrip: flo
                      "gross_return": gross, "net_return": net, "r_multiple": net / (sign * (entry - stop) / entry),
                      "planned_rr": r["plan"]["rr_net"], "leader_corr": corr.get("corr"), "leader_dir": corr.get("leader_dir")}
             if exits:
-                trade.update(hold_h=hold_cap / 60.0, be_r=be_r)
+                trade.update(hold_h=hold_cap / 60.0, be_r=be_r, trail_r=trail_r)
             trades.append(trade)
             tl["busy_until"] = int(ts1[j])
         free_from = min(tl["busy_until"] for tl in timelines)
@@ -952,7 +981,7 @@ def underlying_plan_position(position: dict[str, Any]) -> dict[str, Any]:
     return {"side": position.get("setup_side", "long"), "setup_stop_price": position["setup_stop_price"],
             "setup_target_price": position["setup_target_price"], "entry_price": position.get("entry_underlying_price"),
             **{k: position.get(k) for k in ("setup_initial_stop_price", "setup_max_hold_minutes", "setup_breakeven_r",
-                                             "setup_breakeven_done")}}
+                                             "setup_breakeven_done", "setup_trail_r", "setup_best_price", "setup_trailing")}}
 
 
 def strategy_card() -> dict[str, Any]:

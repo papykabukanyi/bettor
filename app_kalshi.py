@@ -2545,7 +2545,11 @@ def api_study_progress(bot: str):
         return jsonify({"ok": False, "error": "unknown bot"}), 404
     if not secret or request.headers.get("X-Study-Secret", "") != secret:
         return jsonify({"ok": False, "error": "unauthorized"}), 401
-    setup_backtest_job.receive_progress(bot, request.get_json(silent=True) or {})
+    try:
+        shard = int(request.args.get("shard", "1") or 1)
+    except ValueError:
+        shard = 1
+    setup_backtest_job.receive_progress(bot, request.get_json(silent=True) or {}, shard=shard)
     return jsonify({"ok": True})
 
 

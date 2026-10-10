@@ -443,7 +443,7 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
 
         found = None
         by_height = sorted(resistance, key=lambda z: -z["high"])
-        for k in range(last, max(last - BREAKOUT_LOOKBACK_5M, 1) - 1, -1):
+        for k in range(last, max(last - int(BREAKOUT_LOOKBACK_5M), 1) - 1, -1):
             for z in by_height:
                 if formed_before(z, int(f5.ts[k]) - ctx.step5) and f5.close[k] > z["high"] >= f5.close[k - 1]:
                     found = (k, z)
@@ -489,7 +489,7 @@ def _evaluate_long(ctx: Context, as_of: int, *, fee_rate_roundtrip: float, sprea
 
         found = None
         by_depth = sorted(support, key=lambda z: z["low"])
-        for r in range(last, max(last - BREAKOUT_LOOKBACK_5M, 1) - 1, -1):
+        for r in range(last, max(last - int(BREAKOUT_LOOKBACK_5M), 1) - 1, -1):
             for z in by_depth:
                 if not (f5.close[r] > z["high"] >= f5.close[r - 1]):
                     continue  # no reclaim at r: no breakdown before it can qualify

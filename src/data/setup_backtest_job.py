@@ -227,6 +227,19 @@ def _rule_words(bot: str, params: dict[str, Any]) -> str:
         out.append(f"hold <= {params['MAX_HOLD_HOURS']:g} h")
     if params.get("BREAKEVEN_R"):
         out.append(f"break-even at {params['BREAKEVEN_R']:g}R")
+    if params.get("TRAIL_R"):
+        out.append(f"trailing stop {params['TRAIL_R']:g}R")
+    defaults = {}
+    if bot in MULTIYEAR:
+        import importlib
+        m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+        defaults = {k: float(getattr(m, k, 0.0)) for k in IND_KEYS}
+    words = {"VOLUME_MULT": lambda v: f"volume >= {v:g}x", "RETEST_TOL_ATR": lambda v: f"retest within {v:g} ATR",
+             "BREAKOUT_LOOKBACK_5M": lambda v: f"breakout within {int(v) * 5} min",
+             "CORR_MIN": lambda v: "leader rule off" if v > 1 else f"leader rule at |corr| >= {v:g}"}
+    for k in IND_KEYS:
+        if params.get(k) is not None and float(params[k]) != defaults.get(k):
+            out.append(words[k](float(params[k])))
     if params.get("ENTRY_MAX_MINUTE") is not None:
         out.append(f"enter by minute {params['ENTRY_MAX_MINUTE']:g}")
     if params.get("EXIT_MODE") is not None:
@@ -279,6 +292,7 @@ def strategy_board() -> list[dict[str, Any]]:
         yrs = latest_study.get("patterns") or latest_study.get("trained") or latest_study.get("walk_forward") or {}
         row["study"] = {"computed_at": latest_study.get("computed_at"), "unseen": best, "positive_years": yrs.get("positive_years"),
                         "test_years": yrs.get("test_years"), "in_force": enforce, "running": bool(st.get("running")),
+                        "forward_test": latest_study.get("forward_test"), "combinations": len(grid_labels(bot)),
                         "progress": st.get("progress") if st.get("running") else None, "error": st.get("error")}
         rp = latest(bot) or {}
         wc = rp.get("with_correlation") or {}
@@ -422,31 +436,58 @@ MULTIYEAR = {
 
 
 class _SettingFreeCache:
-    """A setup module's evaluate, shared across the plan settings of one
-    symbol's study: a bar where every side fails a rule before the
-    reward/risk step comes out the same at every setting (the stop distance
-    and minimum reward/risk only enter the plan), so it is computed once and
-    remembered as a small marker; bars that reach the plan are evaluated per
-    setting. The replays only read `valid` (and the plan/setup_id of valid
-    results), so the marker is all they need."""
+    """A setup module's evaluate, shared across everything one symbol's study
+    replays. A bar where every side fails a rule comes out the same at any
+    setting that only changes later rules, so it is evaluated once and
+    remembered as a small marker holding the furthest rule any side reached:
+      - plan settings (stop distance, reward/risk) only enter at the
+        reward/risk step: a marker before it is reused at every setting;
+      - an indicator profile (study_runs) changes one rule onward: the
+        default run's markers before that rule are reused, and the profile
+        keeps its own markers for its other plan settings.
+    Bars that reach the plan are evaluated per setting. The replays only
+    read `valid` (and the plan/setup_id of valid results)."""
 
     def __init__(self, module):
         self.module, self.original = module, module.evaluate
-        self.early = set(module.CHECK_ORDER[:module.CHECK_ORDER.index("risk_reward")])
-        self.cache: dict[tuple, dict[str, Any]] = {}
+        self.order = list(module.CHECK_ORDER)
+        self.rr = self.order.index("risk_reward")
+        self.early = set(self.order[:self.rr])
+        self.base: dict[tuple, int] = {}      # the default indicators' markers
+        self.own: dict[tuple, int] = {}       # the current profile's markers
+        self.variant = False
+        self.reuse_before = self.rr
         self.hits = self.misses = 0
+
+    def set_run(self, first_check: int | None) -> None:
+        """A new indicator profile (None: the default indicators)."""
+        self.variant = first_check is not None
+        self.reuse_before = self.rr if first_check is None else min(int(first_check), self.rr)
+        self.own = {}
+
+    def _furthest(self, r: dict[str, Any]) -> int | None:
+        sides = r.get("by_side") or {}
+        if not sides:
+            return 0 if r.get("reason") == "data" else None
+        idx = [self.order.index(v.get("reason")) for v in sides.values() if v.get("reason") in self.order]
+        return max(idx) if len(idx) == len(sides) else None
 
     def __call__(self, ctx, as_of, **kw):
         key = (int(as_of), tuple(kw.get("sides") or ()), kw.get("leader") is not None, bool(kw.get("require_leader")))
-        hit = self.cache.get(key)
-        if hit is not None:
+        own = self.own.get(key) if self.variant else None
+        if own is not None and own < self.rr:
             self.hits += 1
-            return hit
+            return {"valid": False, "reason": self.order[own]}
+        base = self.base.get(key)
+        if base is not None and base < self.reuse_before:
+            self.hits += 1
+            return {"valid": False, "reason": self.order[base]}
         self.misses += 1
         r = self.original(ctx, as_of, **kw)
-        sides = r.get("by_side") or {}
-        if not r.get("valid") and all(side.get("reason") in self.early for side in sides.values()):
-            self.cache[key] = {"valid": False, "reason": r.get("reason")}
+        if not r.get("valid"):
+            furthest = self._furthest(r)
+            if furthest is not None:
+                (self.own if self.variant else self.base)[key] = furthest
         return r
 
     def __enter__(self):
@@ -539,23 +580,48 @@ MULTIYEAR.update({
 #   15m      entry window (the last minute of the window an entry may come
 #            in) x exit style (0 sell at the planned stop or target,
 #            1 sell only at the target, 2 hold to settlement).
-STOP_BUFFERS = tuple(float(x) for x in os.getenv("SETUP_STUDY_STOP_BUFFERS", "0.5,1,1.5,2,2.5,3,4,5").split(","))
-TARGETS = tuple(float(x) for x in os.getenv("SETUP_STUDY_TARGETS", "1.25,1.5,2,2.5,3,4,5").split(","))
-TARGETS_15M = tuple(float(x) for x in os.getenv("SETUP_STUDY_TARGETS_15M", "1.25,1.5,1.75,2,2.5,3,3.5,4,5").split(","))
+# User 2026-10-10: "a lot more combination ... using all the indicators and all
+# the things we want our strategy to have ... a strategy that get into a lot
+# of trades ... using also exit position managements". Every combination
+# keeps the whole method (every check on every bar); the study varies:
+#   plan        stop distance beyond the invalidation (x 15m ATR) x reward/risk
+#   exits       time limit x break-even trigger x trailing stop (in R)
+#   indicators  the method's own filters, from strict to loose (looser = more
+#               trades): volume multiple, retest tolerance, breakout lookback,
+#               the leader-correlation threshold
+# The default indicators get the full plan grid; each other indicator
+# profile a coarse one (COARSE_*), so the search stays affordable.
+STOP_BUFFERS = tuple(float(x) for x in os.getenv("SETUP_STUDY_STOP_BUFFERS", "0.5,0.75,1,1.25,1.5,2,2.5,3,4,5,6").split(","))
+TARGETS = tuple(float(x) for x in os.getenv("SETUP_STUDY_TARGETS", "1.25,1.5,1.75,2,2.5,3,3.5,4,5,6").split(","))
+TARGETS_15M = tuple(float(x) for x in os.getenv("SETUP_STUDY_TARGETS_15M", "1.25,1.5,1.75,2,2.25,2.5,3,3.5,4,4.5,5,6").split(","))
+COARSE_STOPS = (1.0, 2.0, 3.0)
+COARSE_TARGETS = (1.5, 2.5, 4.0)
 BOT_EXITS = {
-    bot: [(float(h), float(be)) for h in holds for be in bes]
-    for bot, holds, bes in (("perps", (2, 4, 8, 12, 24), (0, 0.5, 0.75, 1, 1.5, 2)),
-                            ("crypto", (2, 4, 8, 12, 24), (0, 0.5, 0.75, 1, 1.5, 2)),
-                            ("stocks", (0.5, 1, 2, 4, 6.5), (0, 0.5, 1, 1.5)),
-                            ("options", (0.5, 1, 2, 4, 6.5), (0, 0.5, 1, 1.5)))
+    bot: [(float(h), float(be), float(tr)) for h in holds for be in bes for tr in trails]
+    for bot, holds, bes, trails in (("perps", (2, 4, 8, 24, 48), (0, 0.5, 1), (0, 1, 2)),
+                                    ("crypto", (2, 4, 8, 24, 48), (0, 0.5, 1), (0, 1, 2)),
+                                    ("stocks", (0.5, 1, 2, 4, 6.5), (0, 0.5, 1), (0, 1)),
+                                    ("options", (0.5, 1, 2, 4, 6.5), (0, 0.5, 1), (0, 1)))
 }
-VARIANTS_15M = [(float(m), float(x)) for m in (2, 3, 5) for x in (0, 1, 2)]
+VARIANTS_15M = [(float(m), float(x)) for m in (1, 2, 3, 5, 7) for x in (0, 1, 2)]
+IND_KEYS = ("VOLUME_MULT", "RETEST_TOL_ATR", "BREAKOUT_LOOKBACK_5M", "CORR_MIN")
+IND_VARIANTS: list[tuple[str, dict[str, float]]] = [
+    ("default", {}),
+    ("volume 1.0x", {"VOLUME_MULT": 1.0}), ("volume 1.2x", {"VOLUME_MULT": 1.2}), ("volume 2.0x", {"VOLUME_MULT": 2.0}),
+    ("retest 0.5 ATR", {"RETEST_TOL_ATR": 0.5}), ("breakout within 2h", {"BREAKOUT_LOOKBACK_5M": 24.0}),
+    ("correlation 0.8", {"CORR_MIN": 0.8}), ("correlation off", {"CORR_MIN": 2.0}),
+    ("loose", {"VOLUME_MULT": 1.0, "RETEST_TOL_ATR": 0.5, "BREAKOUT_LOOKBACK_5M": 24.0, "CORR_MIN": 2.0}),
+]
+# The first check each indicator setting changes: a bar every side failed
+# before it fails the same way whatever the setting (each is read only in
+# its own check), so a variant re-evaluates only bars that got that far.
+IND_FIRST_CHECK = {"VOLUME_MULT": "volume", "RETEST_TOL_ATR": "retest", "BREAKOUT_LOOKBACK_5M": "breakout", "CORR_MIN": "correlation"}
 # Legacy names kept for anything still reading them.
 KALSHI_PARAM_GRID = [(sb, rr) for sb in STOP_BUFFERS for rr in TARGETS]
 PERPS_PARAM_GRID = KALSHI_PARAM_GRID
 PERPS_EXITS = BOT_EXITS["perps"]
-PARAM_KEYS = ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")
-PARAM_KEYS_15M = ("STOP_BUFFER_ATR15", "MIN_RR", "ENTRY_MAX_MINUTE", "EXIT_MODE")
+PARAM_KEYS = ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R", "TRAIL_R") + IND_KEYS
+PARAM_KEYS_15M = ("STOP_BUFFER_ATR15", "MIN_RR", "ENTRY_MAX_MINUTE", "EXIT_MODE") + IND_KEYS
 
 
 def _param_label(*values: float) -> str:
@@ -576,24 +642,56 @@ def param_keys(bot: str) -> tuple[str, ...]:
 
 
 def grid_labels(bot: str) -> list[str]:
-    """Every combination a bot's study scores, as the labels its trades carry."""
-    grid = study_grid(bot)
-    if bot in BOT_EXITS:
-        return [_param_label(sb, rr, hold, be) for sb, rr in grid for hold, be in BOT_EXITS[bot]]
-    if bot == "kalshi15m":
-        return [_param_label(sb, rr, minute, mode) for sb, rr in grid for minute, mode in VARIANTS_15M]
-    return [f"{a}:{b}" for a, b in grid]
+    """Every combination a bot's study scores, as the labels its trades carry:
+    plan x exit management (or the 15m bot's entry window x exit style) x
+    the indicator profile (study_runs)."""
+    labels: list[str] = []
+    for run in study_runs(bot):
+        ind = [run["ind"][k] for k in IND_KEYS]
+        for sb, rr in run["plans"]:
+            if bot in BOT_EXITS:
+                labels += [_param_label(sb, rr, h, be, tr, *ind) for h, be, tr in BOT_EXITS[bot]]
+            elif bot == "kalshi15m":
+                labels += [_param_label(sb, rr, mm, xm, *ind) for mm, xm in VARIANTS_15M]
+            else:
+                labels.append(_param_label(sb, rr, *ind))
+    return labels
 
 
 def default_param(bot: str) -> str:
     """The bot's current (untrained) setting, as a study label."""
     import importlib
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+    ind = [float(getattr(m, k)) for k in IND_KEYS]
     if bot in BOT_EXITS:
-        return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.MAX_HOLD_HOURS, m.BREAKEVEN_R)
+        return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.MAX_HOLD_HOURS, m.BREAKEVEN_R, m.TRAIL_R, *ind)
     if bot == "kalshi15m":
-        return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.ENTRY_MAX_MINUTE, m.EXIT_MODE)
-    return f"{m.STOP_BUFFER_ATR15}:{m.MIN_RR}"
+        return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, m.ENTRY_MAX_MINUTE, m.EXIT_MODE, *ind)
+    return _param_label(m.STOP_BUFFER_ATR15, m.MIN_RR, *ind)
+
+
+def study_runs(bot: str) -> list[dict[str, Any]]:
+    """The indicator profiles a bot's study replays, each with its plan
+    settings: the module's own indicators on the full plan grid
+    (study_grid), every other profile on the coarse grid plus the module's
+    own plan. `first_check`: the first check the profile changes (its
+    early failures before that are shared with the default run)."""
+    import importlib
+    m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
+    defaults = {k: float(getattr(m, k)) for k in IND_KEYS}
+    own = (float(m.STOP_BUFFER_ATR15), float(m.MIN_RR))
+    coarse = sorted({(sb, rr) for sb in COARSE_STOPS for rr in COARSE_TARGETS} | {own})
+    runs, seen = [], set()
+    for name, over in IND_VARIANTS:
+        ind = {**defaults, **{k: float(v) for k, v in over.items()}}
+        key = tuple(ind[k] for k in IND_KEYS)
+        if key in seen:
+            continue
+        seen.add(key)
+        changed = [k for k in IND_KEYS if ind[k] != defaults[k]]
+        first = min(m.CHECK_ORDER.index(IND_FIRST_CHECK[k]) for k in changed) if changed else None
+        runs.append({"name": name, "ind": ind, "plans": coarse if changed else study_grid(bot), "first_check": first})
+    return runs
 
 
 PATTERN_FEATURES = ("hour_block", "weekday", "news", "leader", "side", "vol_regime", "us_market")
@@ -763,11 +861,37 @@ def _one_column_each(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[:, ~df.columns.duplicated()] if df.columns.duplicated().any() else df
 
 
+# A study task is one symbol x one year (all of a symbol's years when no
+# year is given): years run in parallel, each read with WARMUP_DAYS of the
+# year before (indicators, zones, the 90-day volatility regime) and TAIL_DAYS
+# after (a trade entered late in the year can still exit). Entries are the
+# year's own; a position open across New Year is not carried into the next
+# year's task (its first trade can overlap it).
+WARMUP_DAYS = 100
+TAIL_DAYS = 3
+
+
+def _year_bounds(year: int) -> tuple[int, int]:
+    y0 = int(dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+    return y0, int(dt.datetime(year + 1, 1, 1, tzinfo=dt.timezone.utc).timestamp())
+
+
+def _shard(candles: pd.DataFrame, year: int | None) -> pd.DataFrame:
+    if year is None or candles is None or candles.empty:
+        return candles
+    y0, y1 = _year_bounds(year)
+    ts = candles["ts"].to_numpy("int64")
+    return candles[(ts >= y0 - WARMUP_DAYS * 86400) & (ts < y1 + TAIL_DAYS * 86400)].reset_index(drop=True)
+
+
 def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
-    """One perps / 15m / Alpaca-crypto study symbol over Alpaca's whole
-    archive, once per plan setting, each trade annotated with its entry
-    conditions."""
-    bot, sym, grid, cost = args
+    """One study task -- a symbol (and year) over Alpaca's archive -- replayed
+    for every indicator profile, plan setting and exit rule (study_runs),
+    each trade labeled with its whole combination and annotated with its
+    entry conditions."""
+    bot, task, cost = args[0], args[1], args[-1]
+    task = task if isinstance(task, dict) else {"key": str(task), "symbol": str(task), "year": None}
+    sym, year, name = task["symbol"], task.get("year"), task["key"]
     try:
         os.nice(15)
     except (AttributeError, OSError):
@@ -777,51 +901,74 @@ def _multiyear_kalshi_symbol(args: tuple) -> pd.DataFrame:
     from data import alpaca_news, alpaca_news_history
     m = importlib.import_module(f"data.{MULTIYEAR[bot]['module']}")
     candles, session = _study_candles(sym, bot)
-    if candles.empty:
+    candles = _shard(candles, year)
+    if candles is None or candles.empty:
         return pd.DataFrame()
     lead_sym = m.leader_for(sym)
     lead, lead_session = _study_candles(lead_sym, bot)
+    lead = _shard(lead, year)
     # Only this asset's articles, read month by month (small in memory).
     news_idx = alpaca_news_history.index_for(alpaca_news.news_symbols(sym))
     from data import alpaca_setup, alpaca_sip_history
     spy = alpaca_setup.regular_session_candles(alpaca_sip_history.load("SPY"))
-    default = (m.STOP_BUFFER_ATR15, m.MIN_RR)
-    frames = []
-    vprep = vol_prep(candles, session)  # the coin's volatility, once for every setting
+    y0, y1 = _year_bounds(year) if year is not None else (-(2 ** 62), 2 ** 62)
+
+    def in_year(ts: int) -> bool:
+        return y0 <= ts < y1
+
+    saved = {k: getattr(m, k) for k in ("STOP_BUFFER_ATR15", "MIN_RR") + IND_KEYS}
+    runs = study_runs(bot)
+    total = sum(len(r["plans"]) for r in runs)
+    frames, done = [], 0
+    vprep = vol_prep(candles, session)  # the asset's volatility, once for every setting
     cache = _SettingFreeCache(m).__enter__()
-    _work_progress(bot, sym, 0, len(grid), 0)
-    for k_setting, setting in enumerate(grid):
-        m.STOP_BUFFER_ATR15, m.MIN_RR = setting
-        exits = [(hold * 60.0, be) for hold, be in BOT_EXITS.get(bot, [])]
-        if bot == "perps":
-            t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
-                         spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
-                         session=session, leader_session=lead_session, exits=exits)
-        elif bot == "crypto":
-            t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
-                         spread_bps=cost["spread_bps"], leader_df=lead if not lead.empty else None, leader_symbol=lead_sym,
-                         exits=exits)
-        elif bot in ("stocks", "options"):
-            t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
-                         spread_bps=cost["spread_bps"], entry_allowed=m.entry_allowed, force_exit=m.must_be_flat,
-                         leader_df=lead if not lead.empty else None, leader_symbol=lead_sym, exits=exits)
-        else:
-            t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead if not lead.empty else None,
-                                 leader_symbol=lead_sym, session=session, leader_session=lead_session,
-                                 minute_average=m.settles_on_minute_average(sym), variants=VARIANTS_15M)
-        if not t.empty:
-            regimes, now = vol_regimes(None, t["entry_ts"].to_numpy("int64"), session, prep=vprep)
-            if "hold_h" in t:
-                label = [_param_label(setting[0], setting[1], hold, be) for hold, be in zip(t["hold_h"], t["be_r"])]
-            elif "entry_max_minute" in t:
-                label = [_param_label(setting[0], setting[1], mm, xm) for mm, xm in zip(t["entry_max_minute"], t["exit_mode"])]
-            else:
-                label = f"{setting[0]}:{setting[1]}"
-            frames.append(_annotate(t, sym, news_idx, regimes, us_market_states(spy, t["entry_ts"].to_numpy("int64"))).assign(
-                symbol=sym, param=label, vol_q_low=(now or [None, None])[0], vol_q_high=(now or [None, None])[1]))
-        _work_progress(bot, sym, k_setting + 1, len(grid), int(sum(len(f) for f in frames)))
-    cache.__exit__()
-    m.STOP_BUFFER_ATR15, m.MIN_RR = default
+    _work_progress(bot, name, 0, total, 0)
+    exits = [(hold * 60.0, be, tr) for hold, be, tr in BOT_EXITS.get(bot, [])]
+    try:
+        for run in runs:
+            for k, v in run["ind"].items():
+                setattr(m, k, v)
+            cache.set_run(run["first_check"])
+            ind = [run["ind"][k] for k in IND_KEYS]
+            for sb, rr in run["plans"]:
+                m.STOP_BUFFER_ATR15, m.MIN_RR = sb, rr
+                lead_df = lead if lead is not None and not lead.empty else None
+                if bot == "perps":
+                    t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
+                                 spread_bps=cost["spread_bps"], entry_allowed=in_year, leader_df=lead_df, leader_symbol=lead_sym,
+                                 session=session, leader_session=lead_session, exits=exits)
+                elif bot == "crypto":
+                    t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
+                                 spread_bps=cost["spread_bps"], entry_allowed=in_year, leader_df=lead_df, leader_symbol=lead_sym,
+                                 exits=exits)
+                elif bot in ("stocks", "options"):
+                    t = m.replay(candles, sides=MULTIYEAR[bot]["sides"], fee_rate_roundtrip=cost["fee_rate_roundtrip"],
+                                 spread_bps=cost["spread_bps"], entry_allowed=lambda ts: in_year(ts) and m.entry_allowed(ts),
+                                 force_exit=m.must_be_flat, leader_df=lead_df, leader_symbol=lead_sym, exits=exits)
+                else:
+                    t = m.replay_windows(candles, half_spread=cost["half_spread"], leader_1m=lead_df,
+                                         leader_symbol=lead_sym, session=session, leader_session=lead_session,
+                                         minute_average=m.settles_on_minute_average(sym), variants=VARIANTS_15M)
+                    if not t.empty:
+                        t = t[(t["entry_ts"] >= y0) & (t["entry_ts"] < y1)].reset_index(drop=True)
+                if not t.empty:
+                    regimes, now = vol_regimes(None, t["entry_ts"].to_numpy("int64"), session, prep=vprep)
+                    if "hold_h" in t:
+                        label = [_param_label(sb, rr, hold, be, tr, *ind)
+                                 for hold, be, tr in zip(t["hold_h"], t["be_r"], t.get("trail_r", pd.Series(0.0, index=t.index)))]
+                    elif "entry_max_minute" in t:
+                        label = [_param_label(sb, rr, mm, xm, *ind) for mm, xm in zip(t["entry_max_minute"], t["exit_mode"])]
+                    else:
+                        label = _param_label(sb, rr, *ind)
+                    frames.append(_annotate(t, sym, news_idx, regimes, us_market_states(spy, t["entry_ts"].to_numpy("int64"))).assign(
+                        symbol=sym, param=label, ind_profile=run["name"], vol_q_low=(now or [None, None])[0],
+                        vol_q_high=(now or [None, None])[1]))
+                done += 1
+                _work_progress(bot, name, done, total, int(sum(len(f) for f in frames)))
+    finally:
+        cache.__exit__()
+        for k, v in saved.items():
+            setattr(m, k, v)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -993,6 +1140,60 @@ def _trade_stats(x: pd.Series) -> dict[str, Any]:
             "total": round(float(x.sum()), 4), "t_stat": None if t is None else round(float(t), 2)}
 
 
+FORWARD_SPLIT = float(os.getenv("SETUP_STUDY_FORWARD_SPLIT", "0.6") or "0.6")
+FORWARD_MIN_TRADES = 30
+
+
+def forward_test(trades: pd.DataFrame, *, default_param: str, keys: tuple[str, ...] = PARAM_KEYS,
+                 min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30) -> dict[str, Any]:
+    """The long forward test (user 2026-10-10): the combination, symbols and
+    losing entry conditions are chosen once on the first FORWARD_SPLIT of the
+    years (the backtest), then frozen and traded through every later year
+    without a single change (the forward test) -- one continuous
+    out-of-sample run, with its drawdown and each year's result. Passes with
+    at least FORWARD_MIN_TRADES trades, a positive average and total, and
+    at least half its years up."""
+    t = trades.copy()
+    t["year"] = pd.to_datetime(t["entry_ts"], unit="s", utc=True).dt.year
+    years = sorted(int(y) for y in t["year"].unique())
+    if len(years) < 3:
+        return {"ok": False, "pass": False, "reason": f"{len(years)} years: too few to hold some back"}
+    n_back = min(max(2, int(round(len(years) * FORWARD_SPLIT))), len(years) - 1)
+    back_years, fwd_years = years[:n_back], years[n_back:]
+    back = t[t["year"].isin(back_years)]
+    best: tuple[str | None, set[str], float] = (None, set(), float("-inf"))
+    for param, g in back.groupby("param"):
+        per = g.groupby("symbol")["net_return"].agg(["size", "mean"])
+        eligible = set(per[(per["size"] >= min_trades) & (per["mean"] > 0)].index)
+        picked = g[g["symbol"].isin(eligible)]["net_return"]
+        if len(picked) >= min_train_trades and picked.sum() > best[2]:
+            best = (str(param), eligible, float(picked.sum()))
+    param, eligible, _ = best
+    if param is None:
+        return {"ok": True, "pass": False, "backtest_years": back_years, "forward_years": fwd_years,
+                "reason": "no combination made money on its symbols over the backtest years"}
+    chosen_back = back[(back["param"] == param) & back["symbol"].isin(eligible)]
+    blocked = learn_blocked(chosen_back) if {"hour_block", "weekday"} <= set(t.columns) else {}
+    in_sample = chosen_back[_keep(chosen_back, blocked)]
+    fwd = t[t["year"].isin(fwd_years) & (t["param"] == param) & t["symbol"].isin(eligible)].sort_values("entry_ts")
+    fwd = fwd[_keep(fwd, blocked)]
+    equity = fwd["net_return"].cumsum()
+    drawdown = float((equity.cummax().clip(lower=0) - equity).max()) if len(equity) else 0.0
+    per_year = [{"year": y, **_trade_stats(fwd[fwd["year"] == y]["net_return"])} for y in fwd_years]
+    up = sum(1 for y in per_year if (y.get("avg") or 0) > 0)
+    stats = _trade_stats(fwd["net_return"])
+    baseline = t[t["year"].isin(fwd_years) & (t["param"] == default_param)]
+    passed = bool(stats.get("trades", 0) >= FORWARD_MIN_TRADES and (stats.get("avg") or 0) > 0 and (stats.get("total") or 0) > 0
+                  and up * 2 >= len(fwd_years))
+    return {"ok": True, "pass": passed, "backtest_years": back_years, "forward_years": fwd_years,
+            "param": _param_values(param, keys), "label": param, "symbols": sorted(eligible), "blocked": blocked,
+            "backtest": _trade_stats(in_sample["net_return"]), "forward": stats,
+            "trades_per_year": round(stats.get("trades", 0) / max(len(fwd_years), 1), 1),
+            "max_drawdown": round(drawdown, 4), "years": per_year, "years_up": up,
+            "default_every_symbol": _trade_stats(baseline["net_return"]),
+            "rule": f"chosen on {back_years[0]}-{back_years[-1]}, frozen through {fwd_years[0]}-{fwd_years[-1]}"}
+
+
 def walk_forward_eligibility(trades: pd.DataFrame, *, min_trades: int = ELIGIBILITY_MIN_TRADES,
                              lookback_years: int = ELIGIBILITY_LOOKBACK_YEARS) -> dict[str, Any]:
     """Each year, trade only symbols whose setup made money (>= min_trades,
@@ -1105,7 +1306,7 @@ def _symbol_fraction(done: int, total: int) -> float:
 
 def _work_files(bot: str) -> dict[str, dict[str, Any]]:
     out = {}
-    for f in _work_dir(bot).glob("*.json") if _work_dir(bot).exists() else []:
+    for f in _work_dir(bot).rglob("*.json") if _work_dir(bot).exists() else []:  # a split study: one folder per share
         try:
             w = json.loads(f.read_text(encoding="utf-8"))
             out[w["symbol"]] = w
@@ -1174,11 +1375,12 @@ def watch_studies(*, now: float | None = None) -> dict[str, Any]:
             continue
         info = job_info(name)
         if info:
-            try:
-                from huggingface_hub import HfApi
-                HfApi(token=os.getenv("HF_API_KEY", "")).cancel_job(job_id=info["job_id"])
-            except Exception as exc:
-                logger.warning("[setup_backtest] could not cancel stalled job %s: %s", info.get("job_id"), exc)
+            from huggingface_hub import HfApi
+            for j in info.get("jobs") or [{"job_id": info.get("job_id")}]:
+                try:
+                    HfApi(token=os.getenv("HF_API_KEY", "")).cancel_job(job_id=j["job_id"])
+                except Exception as exc:
+                    logger.warning("[setup_backtest] could not cancel stalled job %s: %s", j.get("job_id"), exc)
             (LOCAL_DIR / f"{name}.job").unlink(missing_ok=True)
         pid_file = LOCAL_DIR / f"{name}.pid"
         try:
@@ -1345,54 +1547,83 @@ def run_multiyear(bot: str, *, publish: bool = True) -> dict[str, Any]:
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     progress_path = LOCAL_DIR / f"{bot}_multiyear_progress.json"
     version = STUDY_VERSION.get(bot, 1)
-    parts = _load_parts(bot, {"version": version, "grid": grid_labels(bot)})
-    parts = {s: t for s, t in parts.items() if s in symbols}
-    progress: dict[str, Any] = {"bot": bot, "done": len(parts), "total": len(symbols), "workers": MULTIYEAR_WORKERS,
+    key = {"version": version, "grid": grid_labels(bot)}
+    parts = _load_parts(bot, key)
+    shard_k, shard_n = _shard_of(os.getenv("STUDY_SHARD"))
+    progress: dict[str, Any] = {"bot": bot, "done": 0, "total": 0, "workers": MULTIYEAR_WORKERS,
                                 "started_at": dt.datetime.fromtimestamp(started, dt.timezone.utc).isoformat(),
-                                "resumed": sorted(parts), "stage": "replaying"}
+                                "resumed": 0, "stage": "loading the archives", "shard": f"{shard_k + 1}/{shard_n}",
+                                "combinations": len(key["grid"])}
 
     def mark(**kw: Any) -> None:
         progress.update(kw, elapsed_sec=round(time.time() - started), peak_mb=_rss_mb(),
                         trades_so_far=int(sum(len(f) for f in parts.values())))
         progress_path.write_text(json.dumps(progress, default=str), encoding="utf-8")
-        logger.info("[setup_backtest] %s study: %s", bot, {k: progress.get(k) for k in ("stage", "done", "elapsed_sec", "peak_mb")})
+        logger.info("[setup_backtest] %s study: %s", bot, {k: progress.get(k) for k in ("stage", "done", "total", "elapsed_sec", "peak_mb")})
 
     import shutil
     shutil.rmtree(_work_dir(bot), ignore_errors=True)  # in-flight reports of an earlier run are stale
     mark()
-    todo = [s for s in symbols if s not in parts]
+    tasks: list[dict[str, Any]] = []
     costs: dict[str, dict[str, Any]] = {}
-    if todo and bot in ARCHIVE_STUDY_BOTS:
+    if bot in ARCHIVE_STUDY_BOTS:
         if plan:
-            _prefetch_archives(bot, todo)  # a fresh job machine: every file in parallel first
-        # Archives to local disk once, before the workers read them.
+            _prefetch_archives(bot, symbols)  # a fresh job machine: every file in parallel first
+        # Archives to local disk once, before the workers read them; each
+        # symbol's years make its tasks (one symbol x one year each).
         from data import alpaca_news_history
         alpaca_news_history.index_for([])  # every month on local disk once, before the workers read it
-        for sym in sorted(set(todo) | {importlib.import_module(f"data.{cfg['module']}").leader_for(s) for s in todo}):
-            _study_candles(sym, bot)
-        costs = _plan_costs(bot, todo, plan)
+        m = importlib.import_module(f"data.{cfg['module']}")
+        for sym in sorted(set(symbols) | {m.leader_for(x) for x in symbols}):
+            candles = _study_candles(sym, bot)[0]
+            if sym in symbols and candles is not None and not candles.empty:
+                years = sorted({int(y) for y in pd.to_datetime(candles["ts"] - 60, unit="s", utc=True).dt.year.unique()})
+                tasks += [{"key": f"{sym}@{y}", "symbol": sym, "year": y} for y in years]
         from data import alpaca_sip_history
         alpaca_sip_history.load("SPY")
-        jobs = {sym: (_multiyear_kalshi_symbol, (bot, sym, grid, costs[sym])) for sym in todo}
     else:
-        jobs = {sym: (_multiyear_symbol, (sym, cfg["module"], cfg["sides"], grid or [None])) for sym in todo}
+        tasks = [{"key": sym, "symbol": sym, "year": None} for sym in symbols]
+    tasks.sort(key=lambda t: t["key"])
+    task_keys = {t["key"] for t in tasks}
+    parts = {k: t for k, t in parts.items() if k in task_keys}
+    mine = [t for i, t in enumerate(tasks) if i % shard_n == shard_k]
+    todo = [t for t in mine if t["key"] not in parts]
+    if todo and bot in ARCHIVE_STUDY_BOTS:
+        costs = _plan_costs(bot, sorted({t["symbol"] for t in todo}), plan)
+        jobs = {t["key"]: (_multiyear_kalshi_symbol, (bot, t, costs[t["symbol"]])) for t in todo}
+    else:
+        jobs = {t["key"]: (_multiyear_symbol, (t["symbol"], cfg["module"], cfg["sides"], grid or [None])) for t in todo}
+    done_mine = len(mine) - len(todo)
+    mark(stage="replaying", done=done_mine, total=len(mine), resumed=done_mine, tasks=len(tasks))
     if jobs:
         pool = ProcessPoolExecutor(MULTIYEAR_WORKERS)
         try:
-            futures = {pool.submit(fn, args): sym for sym, (fn, args) in jobs.items()}
+            # The biggest tasks first (the longest histories), so no core idles at the end.
+            order = sorted(jobs, key=lambda k: (-(jobs[k][1][1].get("year") or 0) if isinstance(jobs[k][1][1], dict) else 0, k))
+            futures = {pool.submit(jobs[k][0], jobs[k][1]): k for k in order}
             for fut in as_completed(futures):
-                sym = futures[fut]
+                task_key = futures[fut]
                 try:
                     t = fut.result()
                 except Exception as exc:
-                    logger.warning("[setup_backtest] multi-year replay failed for %s: %s", sym, exc)
+                    logger.warning("[setup_backtest] multi-year replay failed for %s: %s", task_key, exc)
                     t = pd.DataFrame()
-                parts[sym] = _one_column_each(t)
-                _save_part(bot, sym, t)
-                (_work_dir(bot) / f"{sym.replace('/', '__')}.json").unlink(missing_ok=True)
-                mark(done=len(parts), last_symbol=sym)
+                parts[task_key] = _one_column_each(t)
+                _save_part(bot, task_key, t)
+                (_work_dir(bot) / f"{task_key.replace('/', '__')}.json").unlink(missing_ok=True)
+                done_mine += 1
+                mark(done=done_mine, last_symbol=task_key)
         finally:
             _stop_pool(pool)
+    if shard_n > 1:
+        # Split across several jobs: the one that finds every task saved
+        # (its own and the others') analyses and publishes; the rest stop.
+        restored = _restore_parts_from_hf(bot, key) or {}
+        parts.update({k: v for k, v in restored.items() if k in task_keys and k not in parts})
+        if not task_keys <= set(parts):
+            mark(stage=f"done with its share; {len(task_keys - set(parts))} tasks still with the other jobs")
+            return {"ok": True, "bot": bot, "shard": f"{shard_k + 1}/{shard_n}", "complete": False,
+                    "seconds": round(time.time() - started)}
     mark(stage="analysing")
     frames = [t for t in parts.values() if not t.empty]
     trades = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1457,6 +1688,8 @@ def _analyse_multiyear(bot: str, trades: pd.DataFrame, *, symbols: list[str], gr
     if {"hour_block", "weekday"} <= set(trades.columns):
         mark(stage="analysing: entry conditions")
         result["patterns"] = walk_forward_patterns(trades, default_param=default, lookback_years=lookback, keys=param_keys(bot))
+    mark(stage="analysing: long forward test")
+    result["forward_test"] = forward_test(trades, default_param=default, keys=param_keys(bot))
     if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
         th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
         result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
@@ -1468,7 +1701,18 @@ def _eligibility_from(result: dict[str, Any]) -> dict[str, Any]:
     """What the bot enforces: the trained setting + symbols when training
     beat the untrained walk-forward out of sample, else the plain list --
     and, when learning the losing entry conditions beat that too, the
-    trained setting + symbols + those conditions."""
+    trained setting + symbols + those conditions. Nothing is enforced unless
+    the long forward test passed as well (when the study ran one)."""
+    out = _eligibility_choice(result)
+    fwd = result.get("forward_test")
+    if fwd is not None:
+        out["forward_test"] = {k: fwd.get(k) for k in ("pass", "forward", "trades_per_year", "max_drawdown", "rule", "years_up")}
+        if not fwd.get("pass"):
+            out["enforce"] = False
+    return out
+
+
+def _eligibility_choice(result: dict[str, Any]) -> dict[str, Any]:
     wf, tr, pt = result.get("walk_forward") or {}, result.get("trained") or {}, result.get("patterns") or {}
     use_trained = bool(tr.get("enforce") and (tr.get("out_of_sample", {}).get("avg") or 0) > (wf.get("out_of_sample", {}).get("avg") or 0))
     best_avg = max((tr.get("out_of_sample", {}).get("avg") or 0) if use_trained else float("-inf"),
@@ -1520,7 +1764,9 @@ def _publish_multiyear(bot: str, result: dict[str, Any]) -> bool:
 # moment's (sometimes pulled) book.
 # All five 2026-10-08 (user: "force the server ... all of them ... pure data"):
 # every study re-learns its whole history on cleaned candles (bar_quality).
-STUDY_VERSION = {"perps": 6, "kalshi15m": 6, "crypto": 3, "stocks": 3, "options": 3}
+# All five 2026-10-10: indicator profiles, trailing-stop exits, 5x the
+# combinations, symbol x year tasks, and the long forward test.
+STUDY_VERSION = {"perps": 7, "kalshi15m": 7, "crypto": 4, "stocks": 4, "options": 4}
 
 
 def study_grid(bot: str) -> list[tuple[float, float]]:
@@ -1673,12 +1919,25 @@ def _running(name: str) -> bool:
 # launch jobs (then the studies run on the Space, one at a time).
 # ---------------------------------------------------------------------------
 STUDY_JOBS = (os.getenv("SETUP_STUDY_JOBS", "1" if os.getenv("SPACE_ID") else "0") or "0") == "1"
-JOB_FLAVORS = {"stocks": "cpu-performance", "perps": "cpu-xl", "kalshi15m": "cpu-xl", "crypto": "cpu-xl", "options": "cpu-xl"}
+JOB_FLAVORS = {"stocks": "cpu-performance", "perps": "cpu-performance", "kalshi15m": "cpu-performance", "crypto": "cpu-performance",
+               "options": "cpu-performance"}
+# A big study is split across several jobs (each takes every n-th symbol x year task).
+JOB_SHARDS = {"stocks": 4, "crypto": 3, "perps": 2}
 FLAVOR_CPUS = {"cpu-basic": 2, "cpu-upgrade": 8, "cpu-xl": 16, "cpu-performance": 32}
 FLAVOR_USD_PER_HOUR = {"cpu-basic": 0.01, "cpu-upgrade": 0.03, "cpu-xl": 1.00, "cpu-performance": 1.90}
-JOB_TIMEOUT = {"stocks": "4h"}
-JOB_TIMEOUT_DEFAULT = "3h"
+# A cap on each job's bill; a study that hits it resumes from its saved tasks.
+JOB_TIMEOUT: dict[str, str] = {}
+JOB_TIMEOUT_DEFAULT = "6h"
 _job_stage_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def _shard_of(spec: str | None) -> tuple[int, int]:
+    """STUDY_SHARD "k/n" (1-based k) -> (k - 1, n); (0, 1) when unset."""
+    try:
+        k, n = (int(x) for x in str(spec).split("/"))
+        return (k - 1, n) if 1 <= k <= n else (0, 1)
+    except (TypeError, ValueError):
+        return 0, 1
 
 
 def _prefetch_archives(bot: str, symbols: list[str]) -> dict[str, int]:
@@ -1753,37 +2012,62 @@ def _space_variables() -> dict[str, str]:
         return {}
 
 
+def job_shards(bot: str) -> int:
+    try:
+        return max(1, int(os.getenv(f"SETUP_STUDY_JOB_SHARDS_{bot.upper()}", JOB_SHARDS.get(bot, 1)) or 1))
+    except ValueError:
+        return 1
+
+
 def launch_remote(bot: str) -> dict[str, Any]:
-    """Run this bot's study as an HF Job (its own machine)."""
+    """Run this bot's study as HF Jobs (its own machines): one job per share
+    (job_shards); the job that finds every task saved analyses and
+    publishes. A share that can't launch cancels the rest (no half study)."""
     from huggingface_hub import HfApi
     name = f"{bot}_multiyear"
     token, space = os.getenv("HF_API_KEY", ""), os.getenv("SPACE_ID", "")
     if not token or not space:
         return {"ok": False, "action": "jobs_unavailable"}
-    flavor = job_flavor(bot)
+    flavor, shards = job_flavor(bot), job_shards(bot)
+    plan = study_plan(bot)
     env = {**_space_variables(), "SETUP_MULTIYEAR_WORKERS": str(FLAVOR_CPUS.get(flavor, 8)), "PYTHONUNBUFFERED": "1",
-           "STUDY_PLAN": json.dumps(study_plan(bot)), "SETUP_STUDY_JOBS": "0"}
-    host = os.getenv("SPACE_HOST", "")
-    if host:
-        env["STUDY_PROGRESS_URL"] = f"https://{host}/api/study-progress/{bot}"
+           "STUDY_PLAN": json.dumps(plan), "SETUP_STUDY_JOBS": "0"}
     secrets = {"HF_API_KEY": token}
     if os.getenv("CRON_SECRET"):
         secrets["STUDY_RELAY_SECRET"] = os.getenv("CRON_SECRET", "")
-    job = HfApi(token=token).run_job(image=f"hf.co/spaces/{space}", command=["bash", "-c", f"cd src && python -m data.setup_backtest_job {name}"],
-                                     flavor=flavor, timeout=JOB_TIMEOUT.get(bot, JOB_TIMEOUT_DEFAULT), env=env, secrets=secrets)
+    host = os.getenv("SPACE_HOST", "")
+    api = HfApi(token=token)
+    jobs: list[dict[str, Any]] = []
+    try:
+        for k in range(1, shards + 1):
+            shard_env = {**env, "STUDY_SHARD": f"{k}/{shards}"}
+            if host:
+                shard_env["STUDY_PROGRESS_URL"] = f"https://{host}/api/study-progress/{bot}?shard={k}"
+            job = api.run_job(image=f"hf.co/spaces/{space}", command=["bash", "-c", f"cd src && python -m data.setup_backtest_job {name}"],
+                              flavor=flavor, timeout=JOB_TIMEOUT.get(bot, JOB_TIMEOUT_DEFAULT), env=shard_env, secrets=secrets)
+            jobs.append({"job_id": job.id, "shard": k})
+    except Exception:
+        for j in jobs:
+            try:
+                api.cancel_job(job_id=j["job_id"])
+            except Exception:
+                pass
+        raise
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
-    (LOCAL_DIR / f"{name}.job").write_text(json.dumps({"job_id": job.id, "flavor": flavor, "cpus": FLAVOR_CPUS.get(flavor),
-                                                       "usd_per_hour": FLAVOR_USD_PER_HOUR.get(flavor),
-                                                       "launched_at": dt.datetime.now(dt.timezone.utc).isoformat()}), encoding="utf-8")
+    (LOCAL_DIR / f"{name}.job").write_text(json.dumps({
+        "job_id": jobs[0]["job_id"], "jobs": jobs, "shards": shards, "flavor": flavor, "cpus": FLAVOR_CPUS.get(flavor),
+        "usd_per_hour": FLAVOR_USD_PER_HOUR.get(flavor), "launched_at": dt.datetime.now(dt.timezone.utc).isoformat()}), encoding="utf-8")
     (LOCAL_DIR / f"{bot}_multiyear.queued").unlink(missing_ok=True)
     (LOCAL_DIR / f"{name}_error.json").unlink(missing_ok=True)
-    progress = {"bot": bot, "done": 0, "total": len(json.loads(env["STUDY_PLAN"])["symbols"]), "stage": f"starting on an HF Job ({flavor})",
-                "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    for f in LOCAL_DIR.glob(f"{name}_progress*.json"):
+        f.unlink(missing_ok=True)
+    progress = {"bot": bot, "done": 0, "total": 0, "stage": f"starting on {shards} HF Job{'s' if shards > 1 else ''} ({flavor})",
+                "started_at": dt.datetime.now(dt.timezone.utc).isoformat(), "combinations": len(grid_labels(bot))}
     (LOCAL_DIR / f"{name}_progress.json").write_text(json.dumps(progress), encoding="utf-8")
     shutil_rmtree(_work_dir(bot))
     _eligibility_cache.pop(bot, None)
-    logger.info("[setup_backtest] %s study launched on HF Job %s (%s)", bot, job.id, flavor)
-    return {"ok": True, "action": "launched_job", "job_id": job.id, "flavor": flavor}
+    logger.info("[setup_backtest] %s study launched on %d HF Job(s) %s (%s)", bot, shards, [j["job_id"] for j in jobs], flavor)
+    return {"ok": True, "action": "launched_job", "job_id": jobs[0]["job_id"], "jobs": jobs, "flavor": flavor}
 
 
 def shutil_rmtree(path: Path) -> None:
@@ -1816,12 +2100,14 @@ def _job_stage(job_id: str) -> str | None:
 
 def _remote_running(name: str) -> bool:
     info = job_info(name) or {}
-    stage = _job_stage(info.get("job_id", ""))
-    if stage is None or stage in ("SCHEDULING", "RUNNING", "PENDING", "STARTING"):
+    jobs = info.get("jobs") or [{"job_id": info.get("job_id", ""), "shard": 1}]
+    stages = [_job_stage(j["job_id"]) for j in jobs]
+    if any(st is None or st in ("SCHEDULING", "RUNNING", "PENDING", "STARTING") for st in stages):
         return True
     bot = name.removesuffix("_multiyear")
     (LOCAL_DIR / f"{name}.job").unlink(missing_ok=True)
     shutil_rmtree(_work_dir(bot))
+    stage = "COMPLETED" if all(st == "COMPLETED" for st in stages) else next(st for st in stages if st != "COMPLETED")
     if stage == "COMPLETED":
         _report_checked.pop(bot, None)
         (LOCAL_DIR / f"{name}.json").unlink(missing_ok=True)
@@ -1832,18 +2118,36 @@ def _remote_running(name: str) -> bool:
     return False
 
 
-def receive_progress(bot: str, payload: dict[str, Any]) -> None:
+def receive_progress(bot: str, payload: dict[str, Any], *, shard: int = 1) -> None:
     """A study job's progress, relayed to the Space: written where a local
-    study writes it, so the dashboards and the watchdog read it the same."""
+    study writes it, so the dashboards and the watchdog read it the same.
+    A study split across jobs reports per share; the shares are merged
+    (tasks done and in flight, the earliest start, the latest sign of
+    life) into the one progress file."""
     name = f"{bot}_multiyear"
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     if payload.get("progress"):
-        (LOCAL_DIR / f"{name}_progress.json").write_text(json.dumps(payload["progress"]), encoding="utf-8")
-    d = _work_dir(bot)
+        (LOCAL_DIR / f"{name}_progress@{int(shard)}.json").write_text(json.dumps(payload["progress"]), encoding="utf-8")
+    d = _work_dir(bot) / f"share{int(shard)}"
     shutil_rmtree(d)
     d.mkdir(parents=True, exist_ok=True)
     for sym, w in (payload.get("work") or {}).items():
         (d / f"{sym.replace('/', '__')}.json").write_text(json.dumps(w), encoding="utf-8")
+    shares = []
+    for f in sorted(LOCAL_DIR.glob(f"{name}_progress@*.json")):
+        try:
+            shares.append(json.loads(f.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+    if shares:
+        merged = dict(shares[0])
+        merged.update(done=sum(int(x.get("done") or 0) for x in shares), total=sum(int(x.get("total") or 0) for x in shares),
+                      trades_so_far=sum(int(x.get("trades_so_far") or 0) for x in shares),
+                      started_at=min(str(x.get("started_at") or "") for x in shares) or None,
+                      shares=[{k: x.get(k) for k in ("shard", "stage", "done", "total")} for x in shares],
+                      stage=next((x.get("stage") for x in shares if str(x.get("stage", "")).startswith("analys")),
+                                 shares[0].get("stage")))
+        (LOCAL_DIR / f"{name}_progress.json").write_text(json.dumps(merged), encoding="utf-8")
 
 
 def _relay_loop(bot: str, stop: threading.Event) -> None:
@@ -1893,8 +2197,11 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
             return {"ok": True, "action": need}
         try:
             return launch_remote(bot)
-        except Exception as exc:  # no job: the Space runs it, one at a time
-            logger.warning("[setup_backtest] HF Job launch failed for %s, studying on the Space: %s", bot, exc)
+        except Exception as exc:  # no job: the Space runs it, one at a time (a split study waits for jobs)
+            logger.warning("[setup_backtest] HF Job launch failed for %s: %s", bot, exc)
+            if job_shards(bot) > 1:
+                _write_error(f"{bot}_multiyear", f"HF Jobs could not launch its {job_shards(bot)} shares: {exc}")
+                return {"ok": False, "action": "jobs_unavailable", "error": str(exc)[:300]}
     if any(_running(f"{b}_multiyear") for b in MULTIYEAR):
         return {"ok": True, "action": "a_study_is_running"}
     if _running("approach_study") or _running("kalshi15m_signal"):
@@ -2062,6 +2369,10 @@ def multiyear_status(bot: str) -> dict[str, Any]:
             out["latest"]["patterns"] = {k: pt.get(k) for k in ("trained", "with_patterns", "default_every_symbol", "positive_years",
                                                                 "test_years", "param_now", "blocked_now", "by_condition", "enforce")}
             out["latest"]["patterns"]["eligible_now"] = pt.get("eligible_now") or []
+        ft = full.get("forward_test") or {}
+        if ft:
+            out["latest"]["forward_test"] = {k: ft.get(k) for k in ("pass", "backtest", "forward", "trades_per_year", "max_drawdown",
+                                                                     "years_up", "forward_years", "backtest_years", "rule", "reason")}
         tr = full.get("trained") or {}
         if tr:
             out["latest"]["trained"] = {k: tr.get(k) for k in ("out_of_sample", "default_every_symbol", "positive_years",

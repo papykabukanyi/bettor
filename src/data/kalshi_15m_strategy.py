@@ -960,7 +960,8 @@ def _setup_defaults() -> dict[str, float]:
     if not _SETUP_DEFAULTS:
         from data import kalshi_15m_setup
         _SETUP_DEFAULTS.update({key: float(getattr(kalshi_15m_setup, key))
-                                for key in ("STOP_BUFFER_ATR15", "MIN_RR", "ENTRY_MAX_MINUTE", "EXIT_MODE")})
+                                for key in ("STOP_BUFFER_ATR15", "MIN_RR", "ENTRY_MAX_MINUTE", "EXIT_MODE",
+                                            "VOLUME_MULT", "RETEST_TOL_ATR", "BREAKOUT_LOOKBACK_5M", "CORR_MIN")})
     return _SETUP_DEFAULTS
 
 

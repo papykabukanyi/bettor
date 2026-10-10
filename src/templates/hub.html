@@ -237,9 +237,6 @@
   <div class="corr-legend"><span>-1</span><span class="bar"></span><span>+1</span><span style="margin-left:10px">red: move opposite &middot; gray: unrelated &middot; blue: move together</span></div>
 </div>
 
-<div class="section-label">&#10024; AI Project Review <span class="line"></span> <span id="ai-report-when" style="text-transform:none; letter-spacing:normal; font-weight:400;"></span></div>
-<div class="ai-card" id="ai-report-body">Loading&hellip;</div>
-
 <footer>Kalshi Perps, Kalshi 15-Minute Markets, Alpaca Stocks, Alpaca Crypto, and Alpaca Options -- 5 independent strategies, one shared host. &middot; Powered by <a href="https://cumdev.onrender.com" target="_blank" rel="noopener">CUMDEV</a></footer>
 
 <script>
@@ -389,8 +386,12 @@
       const trades = `${boardEsc(b.rule)}${sides}${edge}<br><span style="color:var(--muted)">${b.source === "defaults" ? "setup defaults" : "learned (" + boardEsc(b.source) + ")"}${Array.isArray(b.symbols) ? " · " + b.symbols.length + " symbols" : ""}${blocked ? " · skips " + boardEsc(blocked) : ""}</span>`;
       const ss = b.signal_study, sa = (ss && ss.adopted) || {};
       const sig = ss && (ss.computed_at || ss.running) ? `<br><span style="color:var(--muted)">new-signal study: ${ss.running ? "running" : sa.enforce ? "<span class=\"pos\">adopted " + boardEsc(sa.family) + "</span>" : "nothing adopted"}${ss.windows ? " · " + ss.windows + " windows, " + ss.weeks + " weeks" : ""}</span>` : "";
-      const study = st.running ? `running ${(st.progress || {}).done ?? 0}/${(st.progress || {}).total ?? "?"}`
-        : st.error ? `<span class="neg">failed</span>` : u.trades ? `<span class="${u.avg > 0 ? "pos" : "neg"}">${boardAvg(u.avg, "return")}/tr</span> · ${u.trades} tr · ${st.positive_years ?? 0}/${st.test_years ?? 0} yrs up` : "--";
+      const ft = st.forward_test, fw = (ft && ft.forward) || {};
+      const fwd = ft && fw.trades != null ? `<br><span style="color:var(--muted)">forward test ${(ft.forward_years || [])[0] ?? ""}-${(ft.forward_years || []).slice(-1)[0] ?? ""}: </span><span class="${(fw.avg || 0) > 0 ? "pos" : "neg"}">${boardAvg(fw.avg, "return")}/tr</span> · ${fw.trades} tr (${ft.trades_per_year}/yr) · ${ft.years_up}/${(ft.forward_years || []).length} yrs up · ${ft.pass ? "passed" : "not passed"}`
+        : (ft && ft.reason ? `<br><span style="color:var(--muted)">forward test: ${boardEsc(ft.reason)}</span>` : "");
+      const combos = st.combinations ? `<br><span style="color:var(--muted)">${st.combinations.toLocaleString()} combinations</span>` : "";
+      const study = st.running ? `running ${(st.progress || {}).done ?? 0}/${(st.progress || {}).total ?? "?"}${combos}`
+        : st.error ? `<span class="neg">failed</span>` : u.trades ? `<span class="${u.avg > 0 ? "pos" : "neg"}">${boardAvg(u.avg, "return")}/tr</span> · ${u.trades} tr · ${st.positive_years ?? 0}/${st.test_years ?? 0} yrs up${fwd}${combos}` : "--";
       const replay = rp.trades ? `<span class="${rp.avg > 0 ? "pos" : "neg"}">${boardAvg(rp.avg, rp.unit)}/tr</span> · ${rp.trades} tr · ${rp.days}d` : (rp.ok === false ? "failed" : "--");
       const dec = dc.after_close_sec != null ? `${dc.after_close_sec}s after close · ${dc.have}/${dc.of} bars` : "--";
       return `<tr><td><strong>${BOARD_NAME[b.bot] || b.bot}</strong></td><td>${trades}${sig}</td><td>${study}</td><td>${replay}</td><td>${dec}</td></tr>`;
@@ -439,23 +440,6 @@
   }
   refreshLiveBadges();
   setInterval(refreshLiveBadges, 10000);
-
-  // Project-wide, AI-powered status review (HF Inference), all 5 markets -- see
-  // ai_monitor.py's own module docstring. Read-only, fetched once on
-  // load (this is a landing page, not a live dashboard) -- the daily
-  // scheduled job is what actually refreshes the underlying report.
-  fetch("/api/ai-report").then(r => r.json()).then(data => {
-    const body = document.getElementById("ai-report-body");
-    const when = document.getElementById("ai-report-when");
-    const report = data.report;
-    if (!data.ok || !report) { body.textContent = "No review has run yet."; return; }
-    if (report.generated_at) {
-      try { when.textContent = "-- " + new Date(report.generated_at).toLocaleString(); } catch (e) {}
-    }
-    body.textContent = (report.ok && report.report) ? report.report : `Review did not complete (${report.reason || "unknown reason"}).`;
-  }).catch(() => {
-    document.getElementById("ai-report-body").textContent = "Could not load the review.";
-  });
 
   // Global correlation monitor (global_correlation_monitor.py on the Space).
   const CORR_ORDER = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "NEAR", "HYPE", "ZEC", "LINK", "LTC", "SUI", "ADA", "AAVE", "BNB", "SPY", "QQQ", "GOLD", "SILVER", "COPPER"];

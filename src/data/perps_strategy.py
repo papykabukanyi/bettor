@@ -804,6 +804,7 @@ _SETUP_POSITION_KEYS = (
     # must keep the chosen hold limit, a stop already moved to break-even,
     # and the bracket to cancel when the bot closes the position itself.
     "setup_initial_stop_price", "setup_max_hold_minutes", "setup_breakeven_r", "setup_breakeven_done", "exchange_bracket",
+    "setup_trail_r", "setup_best_price", "setup_trailing",
 )
 
 
@@ -2459,7 +2460,9 @@ def _trade_record(
 EXCHANGE_BRACKETS = _env_flag("PERPS_EXCHANGE_BRACKETS", True)
 
 
-_PLAN_DEFAULTS = {key: float(getattr(perps_setup, key)) for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")}
+# The plan, its exit management and the indicator settings a study may learn.
+_PLAN_DEFAULTS = {key: float(getattr(perps_setup, key)) for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R",
+                                                                  "TRAIL_R", "VOLUME_MULT", "RETEST_TOL_ATR", "BREAKOUT_LOOKBACK_5M", "CORR_MIN")}
 
 
 def setup_risk_per_trade_pct() -> float:
@@ -3526,7 +3529,7 @@ def scan_and_enter(*, dry_run: bool | None = None) -> dict[str, Any]:
                         "setup_stop_price": setup_plan["stop"], "setup_target_price": setup_plan["target"],
                         "setup_initial_stop_price": setup_plan["stop"],
                         "setup_max_hold_minutes": float(perps_setup.MAX_HOLD_HOURS) * 60.0,
-                        "setup_breakeven_r": float(perps_setup.BREAKEVEN_R),
+                        "setup_breakeven_r": float(perps_setup.BREAKEVEN_R), "setup_trail_r": float(perps_setup.TRAIL_R),
                         "setup_id": candidate["setup_id"], "setup_kind": candidate["setup"],
                         "setup_rr_net": setup_plan["rr_net"], "setup_risk_pct": setup_plan["risk_pct"],
                         "setup_chart_plan": candidate["setup_plan"], "setup_checks": candidate.get("setup_checks"),

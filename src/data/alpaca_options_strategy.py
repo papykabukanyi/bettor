@@ -568,7 +568,8 @@ def _plan_defaults() -> dict[str, float]:
     if not _PLAN_DEFAULTS:
         from data import alpaca_options_setup
         _PLAN_DEFAULTS.update({key: float(getattr(alpaca_options_setup, key))
-                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R")})
+                               for key in ("STOP_BUFFER_ATR15", "MIN_RR", "MAX_HOLD_HOURS", "BREAKEVEN_R",
+                                           "TRAIL_R", "VOLUME_MULT", "RETEST_TOL_ATR", "BREAKOUT_LOOKBACK_5M", "CORR_MIN")})
     return _PLAN_DEFAULTS
 
 
@@ -1753,7 +1754,7 @@ def scan_and_enter(symbols: list[str] | None = None, *, dry_run: bool | None = N
                     # The exit rule this trade was opened under (on the underlying).
                     "setup_initial_stop_price": setup_plan["stop"],
                     "setup_max_hold_minutes": float(alpaca_options_setup.MAX_HOLD_HOURS) * 60.0,
-                    "setup_breakeven_r": float(alpaca_options_setup.BREAKEVEN_R),
+                    "setup_breakeven_r": float(alpaca_options_setup.BREAKEVEN_R), "setup_trail_r": float(alpaca_options_setup.TRAIL_R),
                 }
 
             if ENTRY_STRATEGY == "debit_spread":
@@ -2100,7 +2101,8 @@ def manage_open_positions(*, dry_run: bool | None = None) -> dict[str, Any]:
                 if alpaca_options_setup.has_plan(position) and underlying_price is not None:
                     plan_pos = alpaca_options_setup.underlying_plan_position(position)
                     if plan_pos.get("entry_price") is not None and alpaca_options_setup.plan_update(plan_pos, underlying_price):
-                        position.update({k: plan_pos[k] for k in ("setup_stop_price", "setup_initial_stop_price", "setup_breakeven_done")})
+                        position.update({k: plan_pos.get(k) for k in ("setup_stop_price", "setup_initial_stop_price", "setup_breakeven_done",
+                                                                     "setup_best_price", "setup_trailing")})
                         logger.info("[alpaca_options_strategy] %s break-even: underlying stop moved to entry %.4f",
                                     contract_symbol, position["setup_stop_price"])
                 should_exit, reason = decide_exit(
