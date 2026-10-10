@@ -819,3 +819,46 @@ def test_nothing_is_enforced_unless_the_forward_test_passes():
     assert e["enforce"] is False and e["forward_test"]["pass"] is False
     result["forward_test"]["pass"] = True
     assert job._eligibility_from(result)["enforce"] is True  # noqa: SLF001
+
+
+def test_a_restarted_space_adopts_its_running_study_jobs(monkeypatch, tmp_path):
+    """A deploy wipes the Space's record of its study jobs; they keep running
+    on HF. The Space finds them and tracks them again -- never a second
+    copy of the same study."""
+    import huggingface_hub
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(job, "STUDY_JOBS", True)
+    monkeypatch.setenv("SPACE_ID", "papylove/bots")
+    Status = type("S", (), {})
+
+    def mk(jid, shard, stage, bot="stocks"):
+        st = Status()
+        st.stage = stage
+        return type("J", (), {"id": jid, "status": st, "flavor": "cpu-performance",
+                              "command": ["bash", "-c", f"cd src && python -m data.setup_backtest_job {bot}_multiyear"],
+                              "environment": {"STUDY_SHARD": f"{shard}/4"}})()
+
+    class Api:
+        def __init__(self, token=None):
+            pass
+
+        def list_jobs(self, namespace=None):
+            assert namespace == "papylove"
+            return [mk("a", 1, "RUNNING"), mk("b", 2, "RUNNING"), mk("c", 3, "COMPLETED"), mk("x", 1, "RUNNING", bot="perps")]
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    monkeypatch.setattr(job, "launch_remote", lambda bot: pytest.fail("a running study must not be launched again"))
+    monkeypatch.setattr(job, "_job_stage", lambda jid: "RUNNING")
+    assert job.maybe_start_multiyear("stocks") == {"ok": True, "action": "running"}
+    info = job.job_info("stocks_multiyear")
+    assert [j["job_id"] for j in info["jobs"]] == ["a", "b"] and info["adopted"] is True
+
+
+def test_the_progress_panel_survives_a_relay_rewriting_its_files(monkeypatch, tmp_path):
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    for _ in range(3):  # rewrites in place: never a missing folder for a reader
+        job.receive_progress("perps", {"progress": {"done": 1, "total": 10}, "work": {"BTC@2024": {"symbol": "BTC@2024", "done": 5,
+                                                                                                    "total": 190, "trades": 3, "updated": 1.0}}})
+    assert list(job._work_files("perps")) == ["BTC@2024"]  # noqa: SLF001
+    job.receive_progress("perps", {"progress": {"done": 2, "total": 10}, "work": {}})
+    assert job._work_files("perps") == {}  # noqa: SLF001 -- finished tasks leave the panel

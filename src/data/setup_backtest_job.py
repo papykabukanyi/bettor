@@ -1305,8 +1305,12 @@ def _symbol_fraction(done: int, total: int) -> float:
 
 
 def _work_files(bot: str) -> dict[str, dict[str, Any]]:
-    out = {}
-    for f in _work_dir(bot).rglob("*.json") if _work_dir(bot).exists() else []:  # a split study: one folder per share
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        files = list(_work_dir(bot).rglob("*.json")) if _work_dir(bot).exists() else []  # a split study: one folder per share
+    except OSError:  # a relay rewrote a folder mid-scan: the next read sees it
+        files = []
+    for f in files:
         try:
             w = json.loads(f.read_text(encoding="utf-8"))
             out[w["symbol"]] = w
@@ -2118,6 +2122,39 @@ def _remote_running(name: str) -> bool:
     return False
 
 
+def _adopt_running_jobs(bot: str) -> bool:
+    """A restart wipes the Space's record of its study jobs, which keep
+    running on HF: find this bot's (running or scheduling) and track them
+    again instead of launching the study a second time."""
+    name = f"{bot}_multiyear"
+    if not STUDY_JOBS or job_info(name):
+        return False
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=os.getenv("HF_API_KEY", ""))
+        mine = [j for j in api.list_jobs(namespace=os.getenv("SPACE_ID", "").split("/")[0] or None)
+                if f"setup_backtest_job {name}" in " ".join(getattr(j, "command", None) or [])
+                and str(getattr(j.status, "stage", j.status)) in ("RUNNING", "SCHEDULING", "PENDING", "STARTING")]
+    except Exception as exc:
+        logger.debug("[setup_backtest] could not list jobs for %s: %s", bot, exc)
+        return False
+    if not mine:
+        return False
+    jobs = []
+    for j in mine:
+        env = getattr(j, "environment", None) or {}
+        shard = _shard_of(env.get("STUDY_SHARD") if isinstance(env, dict) else None)[0] + 1
+        jobs.append({"job_id": j.id, "shard": shard})
+    flavor = str(getattr(mine[0], "flavor", None) or job_flavor(bot))
+    LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    (LOCAL_DIR / f"{name}.job").write_text(json.dumps({
+        "job_id": jobs[0]["job_id"], "jobs": sorted(jobs, key=lambda j: j["shard"]), "shards": len(jobs), "flavor": flavor,
+        "cpus": FLAVOR_CPUS.get(flavor), "usd_per_hour": FLAVOR_USD_PER_HOUR.get(flavor), "adopted": True,
+        "launched_at": dt.datetime.now(dt.timezone.utc).isoformat()}), encoding="utf-8")
+    logger.info("[setup_backtest] %s study: adopted %d running HF Job(s) after a restart", bot, len(jobs))
+    return True
+
+
 def receive_progress(bot: str, payload: dict[str, Any], *, shard: int = 1) -> None:
     """A study job's progress, relayed to the Space: written where a local
     study writes it, so the dashboards and the watchdog read it the same.
@@ -2129,10 +2166,17 @@ def receive_progress(bot: str, payload: dict[str, Any], *, shard: int = 1) -> No
     if payload.get("progress"):
         (LOCAL_DIR / f"{name}_progress@{int(shard)}.json").write_text(json.dumps(payload["progress"]), encoding="utf-8")
     d = _work_dir(bot) / f"share{int(shard)}"
-    shutil_rmtree(d)
     d.mkdir(parents=True, exist_ok=True)
+    keep = set()
     for sym, w in (payload.get("work") or {}).items():
-        (d / f"{sym.replace('/', '__')}.json").write_text(json.dumps(w), encoding="utf-8")
+        path = d / f"{sym.replace('/', '__')}.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(w), encoding="utf-8")
+        os.replace(tmp, path)  # never a missing folder or half a file for a reader
+        keep.add(path.name)
+    for f in d.glob("*.json"):
+        if f.name not in keep:
+            f.unlink(missing_ok=True)
     shares = []
     for f in sorted(LOCAL_DIR.glob(f"{name}_progress@*.json")):
         try:
@@ -2190,7 +2234,7 @@ def maybe_start_multiyear(bot: str) -> dict[str, Any]:
     gets every core). A study that failed waits FAILED_RETRY_HOURS."""
     if STUDY_JOBS:
         # Each study has its own machine: every due one launches at once.
-        if _running(f"{bot}_multiyear"):
+        if _running(f"{bot}_multiyear") or _adopt_running_jobs(bot):
             return {"ok": True, "action": "running"}
         need = _needs_study(bot)
         if need != "due":
@@ -2274,7 +2318,12 @@ def processing_overview(*, now: float | None = None) -> dict[str, Any]:
     for bot in STUDY_PRIORITY:
         if bot not in MULTIYEAR:
             continue
-        st = multiyear_status(bot)
+        try:
+            st = multiyear_status(bot)
+        except Exception as exc:  # one study's bad moment never blanks the whole panel
+            logger.warning("[setup_backtest] status for %s unavailable: %s", bot, exc)
+            studies.append({"bot": bot, "state": "unknown", "error": str(exc)[:200]})
+            continue
         latest = st.get("latest") or {}
         row: dict[str, Any] = {"bot": bot, "combinations": len(grid_labels(bot)), "version": STUDY_VERSION.get(bot, 1),
                                "last_published_at": latest.get("computed_at"), "last_seconds": latest.get("seconds")}
