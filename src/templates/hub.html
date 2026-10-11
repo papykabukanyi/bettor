@@ -353,9 +353,9 @@
     const tasks = (d.tasks || []).filter(t => t.state === "running" || (Date.now() - Date.parse(t.finished_at || 0)) < 12 * 3600e3);
     document.getElementById("proc-wrap").innerHTML =
       `<div class="proc-group">Data jobs</div>` + (tasks.length ? tasks.map(taskRow).join("") : `<div class="proc-row proc-detail">No data job running right now.</div>`) +
-      `<div class="proc-group">Studies (one at a time, in this order)</div>` + (d.studies || []).map(studyRow).join("") +
+      `<div class="proc-group">Studies (each on its own HF machines, relearned every 2 weeks)</div>` + (d.studies || []).map(studyRow).join("") +
       (d.approach_study ? `<div class="proc-group">Every ticker x every timeframe (clean history, walk-forward by year)</div>` + approachRow(d.approach_study) : "") +
-      (d.signal_study ? `<div class="proc-group">15m new-signal study (weekly, scored on held-out weeks)</div>` + signalRow(d.signal_study) : "");
+      (d.signal_study ? `<div class="proc-group">15m new-signal study (every 2 weeks, scored on held-out weeks)</div>` + signalRow(d.signal_study) : "");
   }
   refreshProcessing();
   setInterval(refreshProcessing, 5000);

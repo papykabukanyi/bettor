@@ -544,7 +544,7 @@ def launch() -> dict[str, Any]:
 
 
 def maybe_start() -> dict[str, Any]:
-    """Run when there is no result of this version from the last 7 days
+    """Run when there is no result of this version from the last 14 days
     and no multi-year study holds the cores (it is the user's forced run
     after a deploy: no other wait)."""
     from data import setup_backtest_job
@@ -557,7 +557,7 @@ def maybe_start() -> dict[str, Any]:
         age_days = (time.time() - dt.datetime.fromisoformat(str(data.get("computed_at"))).timestamp()) / 86400
     except (TypeError, ValueError):
         age_days = math.inf
-    if data.get("version") == VERSION and age_days < 7:
+    if data.get("version") == VERSION and age_days < 14:  # relearned every 2 weeks
         return {"ok": True, "action": "fresh"}
     err = _local_dir() / f"{NAME}_error.json"
     if err.exists() and time.time() - err.stat().st_mtime < 3 * 3600:

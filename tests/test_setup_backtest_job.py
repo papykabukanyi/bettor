@@ -862,3 +862,45 @@ def test_the_progress_panel_survives_a_relay_rewriting_its_files(monkeypatch, tm
     assert list(job._work_files("perps")) == ["BTC@2024"]  # noqa: SLF001
     job.receive_progress("perps", {"progress": {"done": 2, "total": 10}, "work": {}})
     assert job._work_files("perps") == {}  # noqa: SLF001 -- finished tasks leave the panel
+
+
+def test_the_full_relearn_runs_every_two_weeks(monkeypatch, tmp_path):
+    """User 2026-10-10: relearn every 2 weeks -- the weekly check skips a bot
+    whose last full study is younger than that, and queues it after."""
+    import datetime as _dt
+    monkeypatch.setattr(job, "LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(job, "_restore_published_report", lambda bot: None)
+    started = []
+    monkeypatch.setattr(job, "maybe_start_multiyear", lambda bot: started.append(bot) or {"ok": True, "action": "launched"})
+
+    def study_from(days_ago: float) -> None:
+        when = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days_ago)
+        (tmp_path / "perps_multiyear.json").write_text(json.dumps({"computed_at": when.isoformat()}))
+
+    study_from(7)
+    out = job.request_multiyear("perps")
+    assert out["action"] == "relearned_recently" and out["every_days"] == 14 and started == []
+    study_from(13.5)
+    assert job.request_multiyear("perps")["action"] == "launched" and started == ["perps"]
+    assert (tmp_path / "perps_multiyear.queued").exists()
+
+
+def test_the_forward_test_gate_tests_the_exact_rule_enforced():
+    """A walk-forward rule (the bot's own setting, learned symbols) is gated
+    by its own forward test -- not blocked because the best-of-thousands
+    search overfitted, nor passed because it did well."""
+    wf = {"enforce": True, "out_of_sample": {"avg": 0.002}, "eligible_now": ["AAPL"]}
+    result = {"walk_forward": wf, "trained": {}, "patterns": {},
+              "forward_test": {"pass": False, "procedure": "best"}, "forward_test_default": {"pass": True, "procedure": "default"}}
+    e = job._eligibility_from(result)  # noqa: SLF001
+    assert e["source"] == "walk_forward" and e["enforce"] is True and e["forward_test"]["procedure"] == "default"
+    result["forward_test_default"]["pass"] = False
+    assert job._eligibility_from(result)["enforce"] is False  # noqa: SLF001
+
+
+def test_the_default_procedure_forward_test_keeps_the_bots_own_setting():
+    keys = ("STOP_BUFFER_ATR15", "MIN_RR")
+    ft = job.forward_test(_ft_trades(0.003, 0.003), default_param="1.0:2.0", keys=keys, procedure="default")
+    assert ft["label"] == "1.0:2.0" and ft["procedure"] == "default" and ft["blocked"] == {} and ft["pass"] is True
+    losing = job.forward_test(_ft_trades(0.003, 0.003), default_param="1.5:3.0", keys=keys, procedure="default")
+    assert losing["pass"] is False and losing["procedure"] == "default" and "no combination made money" in losing["reason"]

@@ -1145,7 +1145,7 @@ FORWARD_MIN_TRADES = 30
 
 
 def forward_test(trades: pd.DataFrame, *, default_param: str, keys: tuple[str, ...] = PARAM_KEYS,
-                 min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30) -> dict[str, Any]:
+                 min_trades: int = ELIGIBILITY_MIN_TRADES, min_train_trades: int = 30, procedure: str = "best") -> dict[str, Any]:
     """The long forward test (user 2026-10-10): the combination, symbols and
     losing entry conditions are chosen once on the first FORWARD_SPLIT of the
     years (the backtest), then frozen and traded through every later year
@@ -1161,6 +1161,8 @@ def forward_test(trades: pd.DataFrame, *, default_param: str, keys: tuple[str, .
     n_back = min(max(2, int(round(len(years) * FORWARD_SPLIT))), len(years) - 1)
     back_years, fwd_years = years[:n_back], years[n_back:]
     back = t[t["year"].isin(back_years)]
+    if procedure == "default":  # the walk-forward's rule: the bot's own setting, only the symbols are learned
+        back = back[back["param"] == default_param]
     best: tuple[str | None, set[str], float] = (None, set(), float("-inf"))
     for param, g in back.groupby("param"):
         per = g.groupby("symbol")["net_return"].agg(["size", "mean"])
@@ -1170,10 +1172,10 @@ def forward_test(trades: pd.DataFrame, *, default_param: str, keys: tuple[str, .
             best = (str(param), eligible, float(picked.sum()))
     param, eligible, _ = best
     if param is None:
-        return {"ok": True, "pass": False, "backtest_years": back_years, "forward_years": fwd_years,
+        return {"ok": True, "pass": False, "backtest_years": back_years, "forward_years": fwd_years, "procedure": procedure,
                 "reason": "no combination made money on its symbols over the backtest years"}
     chosen_back = back[(back["param"] == param) & back["symbol"].isin(eligible)]
-    blocked = learn_blocked(chosen_back) if {"hour_block", "weekday"} <= set(t.columns) else {}
+    blocked = learn_blocked(chosen_back) if procedure == "best" and {"hour_block", "weekday"} <= set(t.columns) else {}
     in_sample = chosen_back[_keep(chosen_back, blocked)]
     fwd = t[t["year"].isin(fwd_years) & (t["param"] == param) & t["symbol"].isin(eligible)].sort_values("entry_ts")
     fwd = fwd[_keep(fwd, blocked)]
@@ -1191,6 +1193,7 @@ def forward_test(trades: pd.DataFrame, *, default_param: str, keys: tuple[str, .
             "trades_per_year": round(stats.get("trades", 0) / max(len(fwd_years), 1), 1),
             "max_drawdown": round(drawdown, 4), "years": per_year, "years_up": up,
             "default_every_symbol": _trade_stats(baseline["net_return"]),
+            "procedure": procedure,
             "rule": f"chosen on {back_years[0]}-{back_years[-1]}, frozen through {fwd_years[0]}-{fwd_years[-1]}"}
 
 
@@ -1694,6 +1697,7 @@ def _analyse_multiyear(bot: str, trades: pd.DataFrame, *, symbols: list[str], gr
         result["patterns"] = walk_forward_patterns(trades, default_param=default, lookback_years=lookback, keys=param_keys(bot))
     mark(stage="analysing: long forward test")
     result["forward_test"] = forward_test(trades, default_param=default, keys=param_keys(bot))
+    result["forward_test_default"] = forward_test(trades, default_param=default, keys=param_keys(bot), procedure="default")
     if {"vol_q_low", "vol_q_high"} <= set(trades.columns):
         th = trades.dropna(subset=["vol_q_low", "vol_q_high"]).groupby("symbol")[["vol_q_low", "vol_q_high"]].first()
         result["vol_thresholds"] = {sym: [float(r.vol_q_low), float(r.vol_q_high)] for sym, r in th.iterrows()}
@@ -1708,9 +1712,14 @@ def _eligibility_from(result: dict[str, Any]) -> dict[str, Any]:
     trained setting + symbols + those conditions. Nothing is enforced unless
     the long forward test passed as well (when the study ran one)."""
     out = _eligibility_choice(result)
-    fwd = result.get("forward_test")
+    # The forward test of the exact rule being enforced: the walk-forward
+    # rule is the bot's own setting with learned symbols; the trained and
+    # pattern rules are the best combination chosen on the backtest years.
+    fwd = result.get("forward_test_default") if out.get("source") == "walk_forward" else result.get("forward_test")
+    if fwd is None and out.get("source") == "walk_forward":
+        fwd = result.get("forward_test")
     if fwd is not None:
-        out["forward_test"] = {k: fwd.get(k) for k in ("pass", "forward", "trades_per_year", "max_drawdown", "rule", "years_up")}
+        out["forward_test"] = {k: fwd.get(k) for k in ("pass", "forward", "trades_per_year", "max_drawdown", "rule", "years_up", "procedure")}
         if not fwd.get("pass"):
             out["enforce"] = False
     return out
@@ -2219,9 +2228,30 @@ def relay_once(bot: str, *, url: str, secret: str, token: str) -> bool:
 FAILED_RETRY_HOURS = float(os.getenv("SETUP_MULTIYEAR_RETRY_HOURS", "6") or "6")
 
 
+# User 2026-10-10: relearn every 2 weeks. The weekly timers stay (they
+# survive restarts, an interval would not); a refresh is skipped while the
+# bot's last full study is younger than RELEARN_DAYS less a day of slack. A
+# change that needs a new study (a version bump) still runs it at once.
+RELEARN_DAYS = float(os.getenv("SETUP_STUDY_RELEARN_DAYS", "14") or "14")
+
+
+def _study_age_days(bot: str) -> float | None:
+    """Days since the bot's last published full study (None: none yet)."""
+    try:
+        computed = json.loads((LOCAL_DIR / f"{bot}_multiyear.json").read_text(encoding="utf-8")).get("computed_at")
+        return (time.time() - dt.datetime.fromisoformat(str(computed)).timestamp()) / 86400
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def request_multiyear(bot: str) -> dict[str, Any]:
-    """The weekly refresh: queue this bot's study; it starts as soon as no
-    other study is running (never two at once on the Space's cores)."""
+    """The scheduled refresh (checked weekly, run every RELEARN_DAYS): queue
+    this bot's study; it starts as soon as it may (its own HF Jobs, or the
+    Space's cores when no study holds them)."""
+    _restore_published_report(bot)
+    age = _study_age_days(bot)
+    if age is not None and age < RELEARN_DAYS - 1:
+        return {"ok": True, "action": "relearned_recently", "age_days": round(age, 1), "every_days": RELEARN_DAYS}
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     (LOCAL_DIR / f"{bot}_multiyear.queued").write_text(dt.datetime.now(dt.timezone.utc).isoformat(), encoding="utf-8")
     return maybe_start_multiyear(bot)

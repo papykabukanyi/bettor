@@ -63,7 +63,7 @@ ADOPT_MIN_TRADES = int(os.getenv("KALSHI_15M_SIGNAL_ADOPT_MIN_TRADES", "50") or 
 ADOPT_MIN_T = float(os.getenv("KALSHI_15M_SIGNAL_ADOPT_MIN_T", "2.5") or "2.5")
 ADOPT_MIN_WEEKS_UP = 0.6
 ADOPT_RECENT_WEEKS = 4
-REFRESH_DAYS = 7
+REFRESH_DAYS = 14  # relearned every 2 weeks (user 2026-10-10)
 # The live bot buys YES only (user decision 2026-10-04); the study scores
 # both sides so a NO edge would show, but only these sides can be adopted.
 LIVE_SIDES = tuple(s for s in (x.strip() for x in os.getenv("KALSHI_15M_SIGNAL_SIDES", "yes").split(","))
